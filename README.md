@@ -70,11 +70,30 @@ development dependencies are not required.
 | macOS Apple silicon | [Download the Apple silicon preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-macos-arm64.zip) | Early testing preview |
 | macOS Intel | [Download the Intel Mac preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-macos-x86_64.zip) | Early testing preview |
 
-### Explore the sample mesh
+### Sample mesh
 
-[Download the sample STL](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0/MeshMill-sample-scan-original.stl).
-It is an intentionally dense composite mesh with redundant layers and uneven point density. Use it
-to explore display modes, crop and regional tools, and compare reduction algorithms without a scanner.
+The sample is an intentionally dense composite mesh with redundant layers and uneven point density.
+Use it to explore display modes, crop and regional tools, and compare reduction algorithms without
+a scanner.
+
+| File | Triangles | Download | Best for |
+| --- | ---: | --- | --- |
+| Quick sample | 249,999 | [`sample-scan.stl`](samples/sample-scan.stl) | Learning the controls and quick evaluation |
+| Full source sample | 4,126,315 | [Download the full sample STL](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0/MeshMill-sample-scan-original.stl) | Dense geometry and large-mesh testing |
+
+The quick sample is included with the repository. The full source sample is also available through
+Git LFS for repository users. See [`samples/README.md`](samples/README.md) for provenance,
+dimensions, and checksums.
+
+### Published papers
+
+Research, formulas, benchmarks, and publication figures are available in the
+[Make Your Own World R&D repository](https://github.com/make-your-own-world/rnd):
+
+- [Depth Adaptive QEM](https://github.com/make-your-own-world/rnd/blob/main/depth-adaptive-qem/depth-adaptive-qem-v1.1.pdf)
+- [Density-Balanced QEM](https://github.com/make-your-own-world/rnd/blob/main/density-balanced-qem/density-balanced-qem-v1.0.pdf)
+- [Depth + Density Adaptive QEM](https://github.com/make-your-own-world/rnd/blob/main/depth-density-adaptive-qem/depth-density-adaptive-qem-v1.1.pdf)
+- [Boundary-Preserved Deterministic QEM](https://github.com/make-your-own-world/rnd/blob/main/boundary-preserved-deterministic-qem/boundary-preserved-deterministic-qem-v1.0.pdf)
 
 **Most Windows users should choose the Windows installer.** Use the portable ZIP only when you do
 not want MeshMill installed or do not have permission to install applications. The normal package
@@ -256,28 +275,7 @@ in [docs/UPDATES.md](docs/UPDATES.md).
 
 Run `.\MeshMillCLI.exe --help` for all options. MeshMill refuses to overwrite its input file.
 
-## Sample geometry
-
-Two versions of the development sample are available. The sample is a composite mesh with
-intentional layers of redundant geometry and varied density. It gives people without a scanner a
-realistic fixture for comparing algorithms, inspecting density, exercising regional operations,
-and developing roadmap features. MeshMill does not require scanned input.
-
-| File | Triangles | Size | Delivery | Best for |
-| --- | ---: | ---: | --- | --- |
-| [`sample-scan.stl`](samples/sample-scan.stl) | 249,999 | 11.9 MiB | Normal Git | Quick evaluation, CI, and learning the controls |
-| [`original-scan.stl`](samples/original-scan.stl) | 4,126,315 | 196.8 MiB | Git LFS | Testing dense source geometry and large-mesh performance |
-
-The smaller sample is downloaded with every normal clone. The untouched original is optional and
-managed through Git LFS so it does not inflate ordinary repository history. GitHub Desktop includes
-Git LFS. Command-line users can install Git LFS and run:
-
-```powershell
-git lfs pull --include="samples/original-scan.stl"
-```
-
-Tagged releases also publish the original STL as a direct download for people who do not use Git.
-See [`samples/README.md`](samples/README.md) for provenance, dimensions, and checksums.
+## Algorithm documentation
 
 Algorithm contributors should also read the
 [algorithm testing guide](docs/ALGORITHM_TESTING.md) before comparing or changing reduction
