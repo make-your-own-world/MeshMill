@@ -63,6 +63,35 @@ reduction quality, density analysis, overlap handling, regional operations, out-
 and future synthesis. Roadmap implementations should report results against this fixture and small
 purpose-built regression meshes, rather than optimizing behavior for one model alone.
 
+## Boundary-Preserved Deterministic QEM, planned for 0.3
+
+MeshMill 0.3 is planned to add Boundary-Preserved Deterministic QEM for binary STL files that are
+too large to load as one complete mesh. Instead of creating one global vertex, face, adjacency, and
+reduction array, it builds a disk-backed spatial index, processes bounded tiles, protects the edges
+where tiles meet, and streams the verified result to a new STL.
+
+This is intended to make very large meshes practical on ordinary workstations. It is designed to
+scale from files that merely exceed available memory to datasets with billions or hundreds of
+billions of triangles, subject to available storage and processing time. It does not claim that a
+dataset of that size has already been benchmarked. The design keeps memory bounded by tile size and
+the chosen worker count, rather than by the total number of triangles in the source file.
+
+The published [Boundary-Preserved Deterministic QEM paper](https://github.com/make-your-own-world/rnd/blob/main/boundary-preserved-deterministic-qem/boundary-preserved-deterministic-qem-v1.0.pdf)
+documents the design and its tests. On the 4.13-million-triangle reference fixture, eight CPU
+workers completed the tiled reduction in 4.67 seconds, compared with 27.34 seconds for one worker.
+Sequential, parallel, and cached runs produced byte-identical output. The assembly tests found no
+loss of accepted tile triangles and no new open edges where tiles met. Protected boundaries retained
+495 extra triangles beyond the requested target, which favors a continuous assembled surface over
+forcing an exact count.
+
+The 0.3 implementation will retain those tested safeguards:
+
+- one owner for each input triangle, so overlapping tiles do not duplicate geometry;
+- unchanged coordinates along tile boundaries, so independently reduced tiles do not pull apart;
+- deterministic target allocation and output order, so reruns produce the same result;
+- memory-aware worker limits, validated checkpoints, cancellation, and resumable work; and
+- streamed output assembly that validates counts before publishing the finished file.
+
 ## Multi-STL workspaces and statistical synthesis
 
 A workspace should accept multiple STL inputs as separate, independently visible source objects.
@@ -181,7 +210,7 @@ Required coordination concepts:
 
 ## Delivery phases
 
-### Phase 0: out-of-core large-mesh processing
+### Phase 0: Boundary-Preserved Deterministic QEM in 0.3
 
 The index, streaming, cache, work-unit, and safety contract is documented in
 [`docs/OUT_OF_CORE.md`](docs/OUT_OF_CORE.md).
