@@ -70,6 +70,12 @@ development dependencies are not required.
 | macOS Apple silicon | [Download the Apple silicon preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-macos-arm64.zip) | Early testing preview |
 | macOS Intel | [Download the Intel Mac preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-macos-x86_64.zip) | Early testing preview |
 
+### Explore the sample mesh
+
+[Download the sample STL](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0/MeshMill-sample-scan-original.stl).
+It is an intentionally dense composite mesh with redundant layers and uneven point density. Use it
+to explore display modes, crop and regional tools, and compare reduction algorithms without a scanner.
+
 **Most Windows users should choose the Windows installer.** Use the portable ZIP only when you do
 not want MeshMill installed or do not have permission to install applications. The normal package
 includes GPU-accelerated viewing, every built-in CPU reduction algorithm, and the minimal CUDA
@@ -83,10 +89,8 @@ Linux and macOS packages are unsigned early previews. They pass automated native
 packaged smoke tests, but still need real-hardware testing. Read the
 [Linux and macOS preview notes](docs/PLATFORM_TESTING.md) before installing them.
 
-Windows SmartScreen or macOS Gatekeeper may warn about unsigned packages.
-An optional [sample STL](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0/MeshMill-sample-scan-original.stl)
-is included with the supported Windows release. Older versions and download checksums are available
-on [GitHub Releases](https://github.com/make-your-own-world/MeshMill/releases).
+Windows SmartScreen or macOS Gatekeeper may warn about unsigned packages. Older versions and
+download checksums are available on [GitHub Releases](https://github.com/make-your-own-world/MeshMill/releases).
 
 ## Quick start
 
