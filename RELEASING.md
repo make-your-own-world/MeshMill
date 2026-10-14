@@ -14,7 +14,7 @@ python tools/release_privacy_check.py
 
 ## Before the first public release
 
-1. Validate the English source catalog. Updated translations are deferred for 0.2.0 and remain
+1. Validate the English source catalog. Updated translations are deferred for the current release and remain
    excluded from release packages until translation, structural validation, and native-speaker review
    are complete.
 2. Review the GPL and third-party notices.
@@ -86,7 +86,7 @@ rendering and the built-in reduction algorithms remain available.
 ## Build Linux and macOS previews
 
 Open **Actions**, select **Platform preview builds**, and choose **Run workflow**. Enter a preview
-version such as `0.2.0-preview.1`.
+version such as `0.3.0-preview.1`.
 
 Leave **Publish a public GitHub prerelease** off for the first run. The workflow builds and tests:
 

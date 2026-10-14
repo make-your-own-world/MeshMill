@@ -19,11 +19,13 @@ import threading
 import time
 import traceback
 import warnings
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import fast_simplification
@@ -38,8 +40,10 @@ from PySide6.QtCore import (
     QPoint,
     QPointF,
     QRect,
+    QRectF,
     QSettings,
     QSignalBlocker,
+    QSize,
     Qt,
     QTimer,
     QUrl,
@@ -49,9 +53,11 @@ from PySide6.QtGui import (
     QColor,
     QCursor,
     QDesktopServices,
+    QFontMetrics,
     QIcon,
     QImage,
     QKeySequence,
+    QLinearGradient,
     QPainter,
     QPainterPath,
     QPalette,
@@ -62,7 +68,9 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QBoxLayout,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -74,14 +82,17 @@ from PySide6.QtWidgets import (
     QKeySequenceEdit,
     QLabel,
     QLayout,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSlider,
     QSpinBox,
+    QTextBrowser,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -113,7 +124,9 @@ from depth_adaptive_qem import (
     cuda_devices,
     first_time_gpu_setup_needed,
     gpu_backend_supported,
+    prepare_gpu_backend,
     simplify_depth_adaptive_qem,
+    simplify_depth_density_adaptive_qem,
 )
 from gpu_resident import inspect_resident_vertices
 from out_of_core import (
@@ -121,6 +134,7 @@ from out_of_core import (
     default_index_directory,
     index_matches,
     load_manifest,
+    optimize_indexed_mesh,
 )
 
 # Conservative allowance for source arrays, VTK objects, render data, and temporary work buffers.
@@ -131,22 +145,82 @@ from meshmill_version import APP_VERSION
 
 APP_NAME = "MeshMill"
 REPOSITORY_URL = "https://github.com/make-your-own-world/MeshMill"
-BUG_REPORT_URL = f"{REPOSITORY_URL}/issues/new?labels=bug&title=%5BBug%5D+"
 FEATURE_REQUEST_URL = f"{REPOSITORY_URL}/issues/new?labels=enhancement&title=%5BFeature%5D+"
 LATEST_RELEASE_API_URL = "https://api.github.com/repos/make-your-own-world/MeshMill/releases/latest"
 SUPPORT_URL = "https://buymeacoffee.com/tednv"
 PRESETS = {"light": 50_000, "balanced": 200_000, "detailed": 400_000}
 UNIT_MM = {"mm": 1.0, "cm": 10.0, "m": 1000.0, "in": 25.4, "ft": 304.8}
 SMART_DIVISORS = {"Draft": 160.0, "Balanced": 500.0, "Fine": 800.0}
-DEPTH_ADAPTIVE_LABEL = "Depth Adaptive QEM (GPU / Higher Quality)"
+DEPTH_ADAPTIVE_LABEL = "Depth Adaptive QEM (GPU / Faster)"
+DEPTH_DENSITY_ADAPTIVE_LABEL = "Depth + Density Adaptive QEM (GPU / Best)"
+LEGACY_ALGORITHM_LABELS = {
+    "Depth Adaptive QEM (GPU / Higher Quality)": DEPTH_ADAPTIVE_LABEL,
+    "Depth + Density Adaptive QEM (GPU / Highest Quality)": DEPTH_DENSITY_ADAPTIVE_LABEL,
+}
 ALGORITHMS = [
-    "Fast QEM",
+    DEPTH_DENSITY_ADAPTIVE_LABEL,
     DEPTH_ADAPTIVE_LABEL,
     "Density balanced",
+    "Fast QEM",
     "Shape preserving",
     "Preserve topology",
 ]
 DISPLAY_MODES = ["Shaded", "Density", "Wireframe", "Vertices"]
+VIEWPORT_OVERLAYS = {
+    "orientation": ("Orientation", "Top left"),
+    "density": ("Point density", "Top right"),
+    "scale": ("Scale", "Bottom right"),
+    "views": ("View controls", "Bottom left"),
+}
+VIEWPORT_CORNERS = ("Top left", "Top right", "Bottom left", "Bottom right")
+
+
+def build_bug_report_url(title: str, details: str, diagnostics: str | None = None) -> str:
+    """Build a GitHub issue draft URL from user-reviewed bug report content."""
+    body = "\n\n".join(
+        (
+            "## What happened\n" + details.strip(),
+            "## Expected result\n",
+            "## Steps to reproduce\n",
+        )
+    )
+    if diagnostics and diagnostics.strip():
+        body += "\n\n## Anonymous diagnostics\n" + diagnostics.strip()
+    query = urlencode({"labels": "bug", "title": title.strip() or "Bug report", "body": body})
+    return f"{REPOSITORY_URL}/issues/new?{query}"
+
+
+def is_gpu_guided_algorithm(algorithm: str) -> bool:
+    return algorithm in (DEPTH_ADAPTIVE_LABEL, DEPTH_DENSITY_ADAPTIVE_LABEL)
+
+
+def default_algorithm(preference: str = "system") -> str:
+    """Choose the highest-quality available production algorithm."""
+    if gpu_backend_supported(preference):
+        return DEPTH_DENSITY_ADAPTIVE_LABEL
+    return "Density balanced"
+
+
+def resolve_startup_algorithm(
+    startup_choice: str,
+    last_used: str,
+    gpu_preference: str = "system",
+) -> str:
+    """Resolve a saved startup choice without selecting an unavailable GPU method."""
+    if startup_choice == "last":
+        candidate = last_used
+    elif startup_choice == "auto":
+        candidate = default_algorithm(gpu_preference)
+    else:
+        candidate = startup_choice
+    candidate = LEGACY_ALGORITHM_LABELS.get(candidate, candidate)
+    if candidate not in ALGORITHMS:
+        candidate = default_algorithm(gpu_preference)
+    if is_gpu_guided_algorithm(candidate) and not gpu_backend_supported(gpu_preference):
+        return "Density balanced"
+    return candidate
+
+
 STANDARD_VIEWS = {
     "top": ((0, 0, 1), (0, 1, 0)),
     "bottom": ((0, 0, -1), (0, 1, 0)),
@@ -201,6 +275,7 @@ SHORTCUT_DEFINITIONS = {
     "zoom_out": ("Zoom out", "Ctrl+Shift+Down"),
     "zoom_in_alt": ("Zoom in (alternate)", "+"),
     "zoom_out_alt": ("Zoom out (alternate)", "-"),
+    "toggle_fullscreen": ("Toggle full screen", "Ctrl+Enter"),
     "roll_counterclockwise": ("Roll counterclockwise", "Ctrl+Shift+Left"),
     "roll_clockwise": ("Roll clockwise", "Ctrl+Shift+Right"),
 }
@@ -209,10 +284,97 @@ CLI_ALGORITHMS = {
     "density": "Density balanced",
     "shape": "Shape preserving",
     "topology": "Preserve topology",
+    "depth-adaptive": DEPTH_ADAPTIVE_LABEL,
+    "depth-density-adaptive": DEPTH_DENSITY_ADAPTIVE_LABEL,
 }
-if gpu_backend_supported():
-    CLI_ALGORITHMS["depth-adaptive"] = DEPTH_ADAPTIVE_LABEL
+CLI_ALGORITHM_KEYS = {label: key for key, label in CLI_ALGORITHMS.items()}
 warnings.filterwarnings("ignore", message="Call to deprecated method.*", category=DeprecationWarning)
+
+
+def _powershell_literal(value: str | Path) -> str:
+    """Return a PowerShell single-quoted literal without interpolation."""
+    return "'" + os.fspath(value).replace("'", "''") + "'"
+
+
+def render_optimization_script(
+    source_path: Path,
+    passes: list[dict[str, object]],
+    omitted_edits: list[str] | tuple[str, ...] = (),
+) -> str:
+    """Create a self-contained, non-interactive PowerShell optimization pipeline."""
+    if not passes:
+        raise ValueError("At least one full-mesh optimization pass is required")
+
+    source = source_path.resolve()
+    default_output = source.with_name(f"{source.stem}_optimized.stl")
+    notes = ""
+    if omitted_edits:
+        edits = ", ".join(dict.fromkeys(omitted_edits))
+        notes = (
+            "# The current UI state also includes edits that cannot be expressed by the CLI: "
+            f"{edits}.\n"
+            "# This script recreates only the committed full-mesh optimization passes.\n"
+        )
+
+    pass_lines = []
+    for index, optimization_pass in enumerate(passes, start=1):
+        algorithm = str(optimization_pass["algorithm"])
+        quality = str(optimization_pass.get("quality", "Balanced")).strip().lower()
+        if quality not in {"draft", "balanced", "fine"}:
+            quality = "balanced"
+        aggressiveness = float(optimization_pass.get("aggressiveness", 7.0))
+        gpu = str(optimization_pass.get("gpu", "system"))
+        pass_lines.extend(
+            (
+                "    @{",
+                f"        Name = 'Pass {index}'",
+                f"        Algorithm = {_powershell_literal(algorithm)}",
+                f"        Quality = {_powershell_literal(quality)}",
+                f"        Aggressiveness = {aggressiveness:g}",
+                f"        Gpu = {_powershell_literal(gpu)}",
+                "    },",
+            )
+        )
+
+    return "\n".join(
+        (
+            "# Generated by MeshMill. This script runs without opening the MeshMill UI.",
+            "# Review or change InputMesh and OutputMesh before running it.",
+            notes.rstrip(),
+            "[CmdletBinding()]",
+            "param(",
+            f"    [string]$InputMesh = {_powershell_literal(source)},",
+            f"    [string]$OutputMesh = {_powershell_literal(default_output)}",
+            ")",
+            "",
+            "$ErrorActionPreference = 'Stop'",
+            "$cli = Join-Path $PSScriptRoot 'MeshMillCLI.exe'",
+            "if (-not (Test-Path -LiteralPath $cli)) { $cli = 'MeshMillCLI.exe' }",
+            "if (-not (Test-Path -LiteralPath $InputMesh)) { throw \"Input mesh was not found: $InputMesh\" }",
+            "if (Test-Path -LiteralPath $OutputMesh) { throw \"Output already exists: $OutputMesh\" }",
+            "",
+            "$passes = @(",
+            *pass_lines,
+            ")",
+            "$runDirectory = Join-Path ([System.IO.Path]::GetDirectoryName($OutputMesh)) (\"MeshMill-run-\" + (Get-Date -Format 'yyyyMMdd-HHmmss'))",
+            "New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null",
+            "$currentMesh = $InputMesh",
+            "",
+            "for ($index = 0; $index -lt $passes.Count; $index++) {",
+            "    $pass = $passes[$index]",
+            "    $isLast = $index -eq ($passes.Count - 1)",
+            "    $nextMesh = if ($isLast) { $OutputMesh } else { Join-Path $runDirectory (\"pass-{0:D2}.stl\" -f ($index + 1)) }",
+            "    $arguments = @($currentMesh, '--algorithm', $pass.Algorithm, '--quality', $pass.Quality, '--aggressiveness', $pass.Aggressiveness, '--gpu', $pass.Gpu, '--output', $nextMesh)",
+            "    Write-Host (\"{0}: {1} ({2})\" -f $pass.Name, $pass.Algorithm, $pass.Quality)",
+            "    & $cli @arguments",
+            "    if ($LASTEXITCODE -ne 0) { throw \"MeshMillCLI failed during $($pass.Name).\" }",
+            "    $currentMesh = $nextMesh",
+            "}",
+            "",
+            "Write-Host \"Saved optimized mesh: $OutputMesh\"",
+            "",
+        )
+    )
 
 
 def resource_path(relative: str) -> Path:
@@ -248,38 +410,190 @@ def localize_widget_tree(root: QWidget) -> None:
     )
 
 
-APP_STYLESHEET = """
-QMainWindow, QWidget#mainRoot { background: #F7F5F1; }
-QWidget { color: #0B1B34; font-family: "Segoe UI"; font-size: 12px; }
-QFrame#toolSection { background: #FBFAF8; border: 1px solid #E4E1DC; border-radius: 8px; }
-QLabel#sectionTitle { color: #0B1B34; font-size: 12px; font-weight: 700;
-                      border-bottom: 2px solid #D9F99D; padding-bottom: 3px; }
-QLabel#fileCard { background: #FFFFFF; border: 1px solid #E4E1DC; border-left: 3px solid #2563FF;
-                  border-radius: 7px; padding: 7px; color: #24324A; }
-QPushButton { background: #FFFFFF; border: 1px solid #D8DCE5; border-radius: 6px; padding: 6px 10px; }
-QPushButton:hover { border-color: #2563FF; background: #F1F5FF; }
-QPushButton:pressed { background: #E2EAFF; }
-QPushButton:disabled { color: #9CA3AF; background: #EEEDEA; border-color: #E4E1DC; }
-QPushButton[accent="true"] { color: white; background: #2563FF; border-color: #2563FF; font-weight: 600; }
-QPushButton[accent="true"]:hover { background: #1B4ED8; }
-QPushButton[accent="true"]:disabled { color: #9CA3AF; background: #EEEDEA; border-color: #E4E1DC; }
-QPushButton[quiet="true"] { background: transparent; }
-QComboBox, QSpinBox { background: #FFFFFF; border: 1px solid #D8DCE5; border-radius: 6px;
-                      padding: 5px 8px; min-height: 18px; }
-QComboBox:hover, QSpinBox:hover { border-color: #2563FF; }
-QComboBox::drop-down { border: 0; width: 22px; }
-QSlider::groove:horizontal { height: 5px; border-radius: 2px; background: #DCE2EC; }
-QSlider::sub-page:horizontal { background: #2563FF; border-radius: 2px; }
-QSlider::handle:horizontal { width: 15px; margin: -5px 0; border-radius: 7px;
-                             background: #FFFFFF; border: 2px solid #2563FF; }
-QCheckBox::indicator { width: 16px; height: 16px; }
-QCheckBox::indicator:checked { background: #2563FF; border: 1px solid #2563FF; border-radius: 3px; }
-QProgressBar { border: 1px solid #D8DCE5; border-radius: 5px; background: #ECEAE6;
-               text-align: center; min-height: 16px; }
-QProgressBar::chunk { background: #2563FF; border-radius: 4px; }
-QToolTip { background: #FBFAF8; color: #0B1B34; border: 1px solid #2563FF;
-           border-radius: 5px; padding: 7px; }
-"""
+DEFAULT_APPEARANCE = "MeshMill Blue"
+APPEARANCE_THEMES = {
+    "MeshMill Blue": {
+        "window": "#F4F8FC", "panel": "#FFFFFF", "surface": "#FBFDFF",
+        "field": "#FFFFFF", "border": "#D5E2EF", "text": "#102A43",
+        "muted": "#61748A", "accent": "#2563EB", "accent_hover": "#1D4ED8", "accent_text": "#FFFFFF",
+        "file_action": "#2563EB", "file_action_hover": "#1D4ED8", "file_action_text": "#FFFFFF",
+        "accent_soft": "#EAF2FF", "disabled": "#EEF2F6", "support": "#D9F99D",
+        "support_hover": "#C7EF7B", "support_border": "#B7D96A",
+        "overlay": "rgba(248, 252, 255, 238)", "viewport": "#0B1B34", "overlay_text": "#102A43",
+        "optimization": "#2563EB", "stats": "#0F9B6C", "general": "#2563EB",
+        "optimization_soft": "#EDF4FF", "stats_soft": "#ECF9F3", "general_soft": "#FFFFFF",
+    },
+    "Light Blue": {
+        "window": "#EEF9FE", "panel": "#FFFFFF", "surface": "#F8FDFF",
+        "field": "#FFFFFF", "border": "#C9E6F1", "text": "#103A58",
+        "muted": "#5D7E95", "accent": "#0F9FB4", "accent_hover": "#087E92", "accent_text": "#FFFFFF",
+        "file_action": "#1673C8", "file_action_hover": "#105FA7", "file_action_text": "#FFFFFF",
+        "accent_soft": "#E1F8FC", "disabled": "#EDF4F6", "support": "#D9F99D",
+        "support_hover": "#C7EF7B", "support_border": "#AFCF71",
+        "overlay": "rgba(245, 252, 255, 238)", "viewport": "#103B5A", "overlay_text": "#103A58",
+        "optimization": "#1673C8", "stats": "#0A9A78", "general": "#B57B13",
+        "optimization_soft": "#EAF5FE", "stats_soft": "#E9F9F4", "general_soft": "#FFF6E2",
+    },
+    "Dark Focus": {
+        "window": "#0D1B26", "panel": "#142633", "surface": "#192F3E",
+        "field": "#10212D", "border": "#2B485A", "text": "#EAF4FB",
+        "muted": "#A5BBC9", "accent": "#16C784", "accent_hover": "#0CAD6F", "accent_text": "#FFFFFF",
+        "file_action": "#2188F5", "file_action_hover": "#1477E1", "file_action_text": "#FFFFFF",
+        "accent_soft": "#1A3B3F", "disabled": "#243744", "support": "#C8EC8D",
+        "support_hover": "#B8DD78", "support_border": "#8EB65B",
+        "overlay": "rgba(13, 27, 38, 238)", "viewport": "#0B1721", "overlay_text": "#EAF4FB",
+        "optimization": "#49A2FF", "stats": "#20C98A", "general": "#F2BD4B",
+        "optimization_soft": "#173552", "stats_soft": "#173F38", "general_soft": "#40371B",
+    },
+    "Earth Tone": {
+        "window": "#F5F3EC", "panel": "#FCFBF6", "surface": "#FFFDF8",
+        "field": "#FFFFFF", "border": "#DDD8C8", "text": "#263D2E",
+        "muted": "#687568", "accent": "#628B66", "accent_hover": "#4D7352", "accent_text": "#FFFFFF",
+        "file_action": "#287CC2", "file_action_hover": "#1D659F", "file_action_text": "#FFFFFF",
+        "accent_soft": "#EDF5E9", "disabled": "#F0EEE6", "support": "#DCEFA6",
+        "support_hover": "#CBE38A", "support_border": "#ABC66A",
+        "overlay": "rgba(252, 251, 246, 238)", "viewport": "#314A3A", "overlay_text": "#F9F7EF",
+        "optimization": "#287CC2", "stats": "#3E8B68", "general": "#B47C1D",
+        "optimization_soft": "#EAF3FA", "stats_soft": "#EDF6EF", "general_soft": "#FBF3E1",
+    },
+}
+
+
+def appearance_theme(name: str) -> dict[str, str]:
+    return APPEARANCE_THEMES.get(name, APPEARANCE_THEMES[DEFAULT_APPEARANCE])
+
+
+def app_stylesheet(name: str = DEFAULT_APPEARANCE, font_size: int = 12) -> str:
+    theme = appearance_theme(name)
+    compact_font_size = max(8, font_size - 3)
+    return "\n".join(
+        (
+            f"QMainWindow, QWidget#mainRoot, QDialog {{ background: {theme['window']}; }}",
+            f"QFrame#appHeader {{ background: {theme['window']}; border-bottom: 1px solid {theme['border']}; }}",
+            f"QScrollArea#toolboxScroll, QWidget#controlsContent {{ background: {theme['window']}; }}",
+            f"QWidget {{ color: {theme['text']}; font-family: 'Segoe UI Variable Text', 'Segoe UI'; font-size: {font_size}px; }}",
+            f"QFrame#toolSection, QFrame#settingsSection, QFrame#metricsPanel {{ background: {theme['panel']}; border: 1px solid {theme['border']}; border-radius: 12px; }}",
+            f"QFrame#toolSection[sectionTone='optimization'] {{ border-top: 3px solid {theme['optimization']}; }}",
+            f"QFrame#toolSection[sectionTone='stats'] {{ border-top: 3px solid {theme['stats']}; }}",
+            f"QFrame#toolSection[sectionTone='general'] {{ background: {theme['general_soft']}; border-top: 3px solid {theme['general']}; }}",
+            f"QLabel#sectionTitle {{ color: {theme['text']}; font-size: {font_size}px; font-weight: 700; padding: 2px 0 6px; }}",
+            f"QLabel#aboutTitle {{ color: {theme['text']}; font-size: {font_size + 6}px; font-weight: 700; }}",
+            f"QLabel#sectionIcon[iconTone='optimization'] {{ color: {theme['optimization']}; }}",
+            f"QLabel#sectionIcon[iconTone='stats'] {{ color: {theme['stats']}; }}",
+            f"QLabel#sectionIcon[iconTone='general'] {{ color: {theme['general']}; }}",
+            f"QLabel[muted='true'] {{ color: {theme['muted']}; }}",
+            f"QLabel#fileCard {{ background: {theme['field']}; border: 1px solid {theme['border']}; border-left: 3px solid {theme['accent']}; border-radius: 8px; padding: 7px; color: {theme['text']}; }}",
+            f"QLabel[qualityMetric='true'] {{ color: {theme['text']}; background: {theme['field']}; border: 1px solid {theme['border']}; border-radius: 6px; padding: 3px 1px; font-size: {max(10, font_size - 1)}px; font-weight: 600; }}",
+            "QLabel[qualityState='good'] { color: #087F53; background: #E8F8F0; border: 2px solid #16A36A; }",
+            "QLabel[qualityState='caution'] { color: #8A5900; background: #FFF5D9; border: 2px solid #D18A00; }",
+            "QLabel[qualityState='warning'] { color: #A62E2E; background: #FCEBEB; border: 2px solid #D14B4B; }",
+            f"QLabel[loadingMetric='true'] {{ background: {theme['accent_soft']}; color: {theme['text']}; border: 1px solid {theme['border']}; border-radius: 5px; padding: 4px 3px; font-size: {compact_font_size}px; font-weight: 700; }}",
+            f"QPushButton {{ background: {theme['field']}; border: 1px solid {theme['border']}; border-radius: 8px; padding: 6px 10px; min-height: 22px; }}",
+            "QPushButton::icon { padding: 0; }",
+            f"QPushButton:hover {{ border-color: {theme['accent']}; background: {theme['accent_soft']}; }}",
+            f"QPushButton:pressed {{ background: {theme['accent_soft']}; }}",
+            f"QPushButton:disabled {{ color: {theme['muted']}; background: {theme['disabled']}; border-color: {theme['border']}; }}",
+            f"QPushButton[accent='true'] {{ color: {theme['accent_text']}; background: {theme['accent']}; border-color: {theme['accent']}; font-weight: 600; }}",
+            f"QPushButton[accent='true']:hover {{ background: {theme['accent_hover']}; }}",
+            f"QPushButton[fileAction='true'] {{ color: {theme['file_action_text']}; background: {theme['file_action']}; border-color: {theme['file_action']}; font-weight: 600; }}",
+            f"QPushButton[fileAction='true']:hover {{ background: {theme['file_action_hover']}; border-color: {theme['file_action_hover']}; }}",
+            f"QPushButton[support='true'] {{ color: #243019; background: {theme['support']}; border-color: {theme['support_border']}; font-weight: 600; }}",
+            f"QPushButton[support='true']:hover {{ background: {theme['support_hover']}; border-color: {theme['support_border']}; }}",
+            "QPushButton[quiet='true'] { background: transparent; text-align: center; }",
+            f"QPushButton#versionLabel {{ color: {theme['muted']}; font-size: {compact_font_size}px; border: 0; background: transparent; padding: 2px; }}",
+            f"QPushButton#versionLabel:hover {{ color: {theme['accent']}; text-decoration: underline; }}",
+            "QPushButton#fullscreenButton { background: transparent; border: 0; border-radius: 6px; padding: 2px; min-width: 28px; min-height: 24px; }",
+            f"QPushButton#fullscreenButton:hover {{ background: {theme['accent_soft']}; border: 1px solid {theme['border']}; }}",
+            f"QComboBox, QSpinBox, QLineEdit, QPlainTextEdit, QTextBrowser {{ background: {theme['field']}; border: 1px solid {theme['border']}; border-radius: 7px; padding: 5px 8px; min-height: 18px; }}",
+            f"QComboBox:hover, QSpinBox:hover, QLineEdit:hover {{ border-color: {theme['accent']}; }}",
+            "QComboBox::drop-down { border: 0; width: 22px; }",
+            f"QSlider::groove:horizontal {{ height: 6px; border-radius: 3px; background: {theme['border']}; }}",
+            f"QSlider::sub-page:horizontal {{ background: {theme['accent']}; border-radius: 3px; }}",
+            f"QSlider::handle:horizontal {{ width: 16px; margin: -5px 0; border-radius: 8px; background: {theme['field']}; border: 2px solid {theme['accent']}; }}",
+            "QCheckBox::indicator { width: 16px; height: 16px; }",
+            f"QCheckBox::indicator:checked {{ background: {theme['accent']}; border: 1px solid {theme['accent']}; border-radius: 4px; }}",
+            f"QProgressBar {{ border: 1px solid {theme['border']}; border-radius: 6px; background: {theme['disabled']}; text-align: center; min-height: 20px; }}",
+            f"QProgressBar::chunk {{ background: {theme['accent']}; border-radius: 5px; }}",
+            f"QFrame#viewPad {{ background: {theme['overlay']}; border: 1px solid {theme['border']}; border-radius: 10px; }}",
+            f"QFrame#viewPad QPushButton {{ background: {theme['field']}; color: {theme['text']}; border: 1px solid {theme['border']}; border-radius: 6px; min-width: 58px; min-height: 27px; padding: 2px 6px; }}",
+            f"QFrame#viewPad QPushButton:hover {{ background: {theme['accent_soft']}; border-color: {theme['accent']}; }}",
+            f"QFrame#viewPad QPushButton:checked {{ background: {theme['accent']}; color: white; border-color: {theme['accent_hover']}; }}",
+            f"QFrame#loadingPanel {{ background: {theme['overlay']}; border: 1px solid {theme['border']}; border-radius: 14px; }}",
+            f"QFrame#loadingPanel QLabel {{ background: transparent; color: {theme['text']}; }}",
+            "QFrame#loadingPanel QProgressBar { min-height: 24px; max-height: 24px; }",
+            f"QFrame#loadingPanel QProgressBar::chunk {{ background: {theme['accent']}; }}",
+            f"QToolTip {{ background: {theme['panel']}; color: {theme['text']}; border: 1px solid {theme['accent']}; border-radius: 7px; padding: 7px; }}",
+        )
+    )
+
+
+APP_STYLESHEET = app_stylesheet()
+
+
+def draw_ui_icon(kind: str, color: str, size: int = 18) -> QIcon:
+    """Create the small, theme-aware line icons used by the desktop controls."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color), max(1.4, size / 12))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    m = size * 0.16
+    r = QRectF(m, m, size - 2 * m, size - 2 * m)
+    if kind == "optimize":
+        painter.drawPolygon(QPolygonF((QPointF(size / 2, m), QPointF(size - m, size - m), QPointF(m, size - m))))
+    elif kind == "stats":
+        for x, top in ((m, size * .53), (size * .43, size * .30), (size * .70, size * .12)):
+            painter.drawLine(QPointF(x, size - m), QPointF(x, top))
+    elif kind == "general":
+        painter.drawRoundedRect(r.adjusted(1, 1, -1, -1), 2, 2)
+        painter.drawLine(QPointF(size * .31, size * .43), QPointF(size * .69, size * .43))
+        painter.drawLine(QPointF(size * .31, size * .62), QPointF(size * .61, size * .62))
+    elif kind == "folder":
+        painter.drawRoundedRect(QRectF(m, size * .35, size - 2 * m, size * .48), 2, 2)
+        painter.drawLine(QPointF(m, size * .35), QPointF(size * .40, size * .35))
+        painter.drawLine(QPointF(size * .40, size * .35), QPointF(size * .48, size * .25))
+        painter.drawLine(QPointF(size * .48, size * .25), QPointF(size * .68, size * .25))
+    elif kind == "copy":
+        painter.drawRoundedRect(QRectF(size * .34, size * .22, size * .46, size * .54), 2, 2)
+        painter.drawRoundedRect(QRectF(size * .18, size * .37, size * .46, size * .54), 2, 2)
+    elif kind == "settings":
+        painter.drawEllipse(r.adjusted(2, 2, -2, -2))
+        painter.drawEllipse(QRectF(size * .43, size * .43, size * .14, size * .14))
+        for angle in range(0, 360, 45):
+            a = math.radians(angle)
+            cx, cy = size / 2, size / 2
+            painter.drawLine(QPointF(cx + math.cos(a) * size * .32, cy + math.sin(a) * size * .32), QPointF(cx + math.cos(a) * size * .42, cy + math.sin(a) * size * .42))
+    elif kind == "info":
+        painter.drawEllipse(r)
+        painter.drawPoint(QPointF(size / 2, size * .32))
+        painter.drawLine(QPointF(size / 2, size * .45), QPointF(size / 2, size * .70))
+    elif kind == "github":
+        painter.drawEllipse(QRectF(size * .23, size * .23, size * .54, size * .54))
+        painter.drawArc(QRectF(size * .32, size * .40, size * .36, size * .30), 0, 180 * 16)
+        painter.drawLine(QPointF(size * .36, size * .35), QPointF(size * .28, size * .25))
+        painter.drawLine(QPointF(size * .64, size * .35), QPointF(size * .72, size * .25))
+    elif kind == "open":
+        painter.drawRect(QRectF(m, size * .34, size - 2 * m, size * .50))
+        painter.drawLine(QPointF(size * .50, size * .13), QPointF(size * .50, size * .60))
+        painter.drawLine(QPointF(size * .34, size * .30), QPointF(size * .50, size * .13))
+        painter.drawLine(QPointF(size * .66, size * .30), QPointF(size * .50, size * .13))
+    elif kind == "fullscreen":
+        inset = size * .27
+        extent = size * .16
+        painter.drawLine(QPointF(inset, inset + extent), QPointF(inset, inset))
+        painter.drawLine(QPointF(inset, inset), QPointF(inset + extent, inset))
+        painter.drawLine(QPointF(size - inset - extent, inset), QPointF(size - inset, inset))
+        painter.drawLine(QPointF(size - inset, inset), QPointF(size - inset, inset + extent))
+        painter.drawLine(QPointF(inset, size - inset - extent), QPointF(inset, size - inset))
+        painter.drawLine(QPointF(inset, size - inset), QPointF(inset + extent, size - inset))
+        painter.drawLine(QPointF(size - inset - extent, size - inset), QPointF(size - inset, size - inset))
+        painter.drawLine(QPointF(size - inset, size - inset - extent), QPointF(size - inset, size - inset))
+    painter.end()
+    return QIcon(pixmap)
 
 
 class ResultBridge(QObject):
@@ -320,6 +634,8 @@ class MeshHistoryState:
     showing_original: bool
     preview_dirty: bool
     committed_optimization: bool
+    optimization_script_passes: tuple[dict[str, object], ...]
+    optimization_script_omissions: tuple[str, ...]
 
 
 class _PdhValueUnion(ctypes.Union):
@@ -459,6 +775,91 @@ class WindowsGpuCounters:
             self.query = ctypes.c_void_p()
 
 
+class NvidiaSmiCounters:
+    """Cached per-adapter CUDA activity from NVIDIA's standard diagnostic utility."""
+
+    def __init__(self) -> None:
+        self._last_sample_at = 0.0
+        self._samples: dict[str, tuple[float, float]] = {}
+
+    def sample(self, preference: str = "system") -> tuple[float, float] | None:
+        now = time.monotonic()
+        if now - self._last_sample_at >= 1.0:
+            try:
+                result = subprocess.run(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=pci.bus_id,utilization.gpu,memory.used",
+                        "--format=csv,noheader,nounits",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=0.4,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    check=False,
+                )
+                samples: dict[str, tuple[float, float]] = {}
+                for line in result.stdout.splitlines():
+                    parts = [part.strip() for part in line.split(",")]
+                    if len(parts) != 3:
+                        continue
+                    try:
+                        samples[parts[0].lower()] = (float(parts[1]), float(parts[2]) * 1024 * 1024)
+                    except ValueError:
+                        continue
+                if samples:
+                    self._samples = samples
+            except (OSError, subprocess.SubprocessError):
+                pass
+            self._last_sample_at = now
+        if not self._samples:
+            return None
+        selected = preference.lower()
+        if selected != "system" and selected in self._samples:
+            return self._samples[selected]
+        return min(self._samples.values(), key=lambda value: value[1])
+
+
+class ElidedPathLabel(QLabel):
+    """A single-line file path label that keeps the filename visible."""
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self._full_text = ""
+        self.setWordWrap(False)
+        self.set_full_text(text)
+
+    def set_full_text(self, text: str) -> None:
+        self._full_text = text
+        self.setToolTip(text if text else "")
+        self._update_elision()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_elision()
+
+    def _update_elision(self) -> None:
+        available = max(24, self.contentsRect().width() - 12)
+        metrics = QFontMetrics(self.font())
+        normalized = self._full_text.replace("/", "\\")
+        drive, remainder = os.path.splitdrive(normalized)
+        parts = [part for part in remainder.split("\\") if part]
+        filename = parts[-1] if parts else normalized
+        root = f"{drive}\\" if drive else ""
+        candidates = [
+            normalized,
+            f"{root}{parts[0]}\\…\\{filename}" if len(parts) > 2 else normalized,
+            f"{root}…\\{filename}" if root and len(parts) > 1 else normalized,
+            f"…\\{filename}" if len(parts) > 1 else filename,
+            filename,
+        ]
+        visible = next(
+            (candidate for candidate in candidates if metrics.horizontalAdvance(candidate) <= available),
+            metrics.elidedText(filename, Qt.TextElideMode.ElideRight, available),
+        )
+        super().setText(visible)
+
+
 class ViewButton(QPushButton):
     orientationRequested = Signal()
 
@@ -547,14 +948,30 @@ class OrientationIndicator(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedSize(180, 104)
+        # The cube and compact X/Y/Z readout need roughly 130 px. Keep the overlay tight so it
+        # reads as a viewport aid rather than a panel occupying the scene.
+        self.setFixedSize(138, 102)
         self.setToolTip("Camera rotation relative to the mesh's current X, Y, and Z axes.")
         self._right = np.array((1.0, 0.0, 0.0))
         self._up = np.array((0.0, 1.0, 0.0))
         self._forward = np.array((0.0, 0.0, -1.0))
         self._orientation = (0.0, 0.0, 0.0)
+        self._theme = appearance_theme(DEFAULT_APPEARANCE)
+        self._viewport_background = QColor(self._theme["viewport"])
 
-    def set_camera(self, position, focal, view_up, orientation) -> None:
+    def set_theme(self, theme: dict[str, str], viewport_theme: dict[str, str] | None = None) -> None:
+        self._theme = theme
+        self._viewport_background = QColor((viewport_theme or theme)["viewport"])
+        self.update()
+
+    def set_camera(
+        self,
+        position,
+        focal,
+        view_up,
+        orientation,
+        reference_basis: np.ndarray | None = None,
+    ) -> None:
         forward = np.asarray(focal, dtype=float) - np.asarray(position, dtype=float)
         forward /= max(float(np.linalg.norm(forward)), 1e-12)
         up = np.asarray(view_up, dtype=float)
@@ -562,37 +979,63 @@ class OrientationIndicator(QWidget):
         up /= max(float(np.linalg.norm(up)), 1e-12)
         right = np.cross(forward, up)
         right /= max(float(np.linalg.norm(right)), 1e-12)
-        self._right = right
-        self._up = up
-        self._forward = forward
+        if reference_basis is not None and reference_basis.shape == (3, 3):
+            # A saved named view becomes the indicator's local zero. Express the
+            # live camera frame in that basis so the cube and axes agree with the
+            # zeroed X/Y/Z readout.
+            self._right = reference_basis.T @ right
+            self._up = reference_basis.T @ up
+            self._forward = reference_basis.T @ forward
+        else:
+            self._right = right
+            self._up = up
+            self._forward = forward
         self._orientation = tuple(float(value) for value in orientation)
         self.update()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
+        painter.fillRect(self.rect(), self._viewport_background)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor("#425A78"), 1.0))
-        painter.setBrush(QColor(11, 27, 52, 225))
+        painter.setPen(QPen(QColor(self._theme["border"]), 1.0))
+        panel_color = QColor(self._theme["panel"])
+        panel_color.setAlpha(242)
+        painter.setBrush(panel_color)
         painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 9, 9)
         center_x = self.width() / 2.0
         center = QPointF(center_x, 47.0)
 
-        cube = QPolygonF(
-            [
-                QPointF(center_x, 19),
-                QPointF(center_x + 21, 31),
-                QPointF(center_x, 43),
-                QPointF(center_x - 21, 31),
-            ]
+        # Project a real cube in the same camera basis as the axes. The old static diamond
+        # implied orientation but did not rotate with the live X/Y/Z arrows.
+        cube_vertices = np.asarray(
+            (
+                (-1.0, -1.0, -1.0), (1.0, -1.0, -1.0),
+                (1.0, 1.0, -1.0), (-1.0, 1.0, -1.0),
+                (-1.0, -1.0, 1.0), (1.0, -1.0, 1.0),
+                (1.0, 1.0, 1.0), (-1.0, 1.0, 1.0),
+            ),
+            dtype=float,
         )
-        painter.setPen(QPen(QColor("#AFC5E6"), 1.2))
-        painter.setBrush(QColor(42, 65, 96, 220))
-        painter.drawPolygon(cube)
-        painter.drawLine(QPointF(center_x - 21, 31), QPointF(center_x - 21, 55))
-        painter.drawLine(QPointF(center_x + 21, 31), QPointF(center_x + 21, 55))
-        painter.drawLine(QPointF(center_x, 43), QPointF(center_x, 67))
-        painter.drawLine(QPointF(center_x - 21, 55), QPointF(center_x, 67))
-        painter.drawLine(QPointF(center_x + 21, 55), QPointF(center_x, 67))
+        cube_faces = (
+            (0, 1, 2, 3), (4, 5, 6, 7), (0, 1, 5, 4),
+            (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7),
+        )
+        cube_scale = 15.0
+        projected_cube = [
+            QPointF(
+                center.x() + float(vertex @ self._right) * cube_scale,
+                center.y() - float(vertex @ self._up) * cube_scale,
+            )
+            for vertex in cube_vertices
+        ]
+        painter.setPen(QPen(QColor(self._theme["text"]), 1.1))
+        cube_color = QColor(self._theme["surface"])
+        for face in sorted(cube_faces, key=lambda indices: float(np.mean(cube_vertices[list(indices)] @ self._forward))):
+            face_color = QColor(cube_color)
+            depth = float(np.mean(cube_vertices[list(face)] @ self._forward))
+            face_color.setAlpha(105 if depth < 0 else 185)
+            painter.setBrush(face_color)
+            painter.drawPolygon(QPolygonF([projected_cube[index] for index in face]))
 
         axes = (
             ("X", np.array((1.0, 0.0, 0.0)), QColor("#FF5A5F")),
@@ -615,7 +1058,7 @@ class OrientationIndicator(QWidget):
             painter.drawText(QRect(int(end.x() - 8), int(end.y() - 9), 16, 18), Qt.AlignmentFlag.AlignCenter, label)
 
         x, y, z = (round(value) for value in self._orientation)
-        painter.setPen(QColor("#D8E5F7"))
+        painter.setPen(QColor(self._theme["text"]))
         angle_font = painter.font()
         angle_font.setPointSizeF(8.5)
         painter.setFont(angle_font)
@@ -631,9 +1074,13 @@ class ViewportScaleBar(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedSize(200, 46)
+        self.setFixedSize(150, 40)
         self._label = ""
-        self._pixels = 120.0
+        self._pixels = 96.0
+        self._background = QColor("#0B1B34")
+        self._card = QColor("#132842")
+        self._border = QColor("#3C5870")
+        self._foreground = QColor("#EBF2FC")
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         # QVTKRenderWindowInteractor is a native OpenGL surface. Transparent
         # child-widget updates can leave previous scale-bar frames behind while
@@ -641,41 +1088,133 @@ class ViewportScaleBar(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
     def set_scale(self, label: str, pixels: float) -> None:
-        clamped_pixels = max(24.0, min(170.0, float(pixels)))
-        if label == self._label and abs(clamped_pixels - self._pixels) < 0.25:
+        clamped_pixels = max(24.0, min(118.0, float(pixels)))
+        metrics = QFontMetrics(self.font())
+        content_width = max(clamped_pixels, float(metrics.horizontalAdvance(label) + 12))
+        desired_width = max(64, min(142, math.ceil(content_width + 16)))
+        if (
+            label == self._label
+            and abs(clamped_pixels - self._pixels) < 0.25
+            and desired_width == self.width()
+        ):
             return
         self._label = label
         self._pixels = clamped_pixels
+        self.setFixedWidth(desired_width)
+        self.update()
+
+    def set_theme(self, theme: dict[str, str], viewport_theme: dict[str, str] | None = None) -> None:
+        self._background = QColor((viewport_theme or theme)["viewport"])
+        self._card = QColor(theme["surface"])
+        self._card.setAlpha(232)
+        self._border = QColor(theme["border"])
+        self._foreground = QColor(theme["text"])
         self.update()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#0B1B34"))
+        painter.fillRect(self.rect(), self._background)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(235, 242, 252, 235), 2.0))
-        right = self.width() - 12.0
+        painter.setPen(QPen(self._border, 1.0))
+        painter.setBrush(self._card)
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 8, 8)
+        foreground = QColor(self._foreground)
+        foreground.setAlpha(235)
+        painter.setPen(QPen(foreground, 2.0))
+        right = self.width() - 8.0
         left = right - self._pixels
-        y = 31.0
+        y = 27.0
         painter.drawLine(QPointF(left, y), QPointF(right, y))
         painter.drawLine(QPointF(left, y - 5), QPointF(left, y + 5))
         painter.drawLine(QPointF(right, y - 5), QPointF(right, y + 5))
-        painter.setPen(QColor(235, 242, 252, 245))
+        foreground.setAlpha(245)
+        painter.setPen(foreground)
         painter.drawText(
-            QRect(int(left), 4, int(self._pixels), 20),
+            QRect(4, 2, self.width() - 8, 19),
             Qt.AlignmentFlag.AlignCenter,
             self._label,
         )
 
 
+class DensityLegend(QWidget):
+    """Compact, rendered density scale that stays legible over the viewport."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(230, 78)
+        self._theme = appearance_theme(DEFAULT_APPEARANCE)
+        self._viewport_background = QColor(self._theme["viewport"])
+        self._gradient_colors: tuple[tuple[int, int, int], tuple[int, int, int]] | None = None
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def set_theme(self, theme: dict[str, str], viewport_theme: dict[str, str] | None = None) -> None:
+        self._theme = theme
+        self._viewport_background = QColor((viewport_theme or theme)["viewport"])
+        self.update()
+
+    def set_gradient_colors(
+        self, colors: tuple[tuple[int, int, int], tuple[int, int, int]] | None
+    ) -> None:
+        self._gradient_colors = colors
+        self.update()
+
+    # Compatibility with the previous QLabel setup. These calls are intentionally ignored
+    # because this widget renders a real gradient rather than rich-text dots.
+    def setText(self, _text: str) -> None:
+        pass
+
+    def setTextFormat(self, _format) -> None:
+        pass
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self._viewport_background)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        card = QColor(self._theme["panel"])
+        card.setAlpha(238)
+        painter.setPen(QPen(QColor(self._theme["border"]), 1.0))
+        painter.setBrush(card)
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 9, 9)
+        text_color = QColor(self._theme["text"])
+        title_font = painter.font()
+        title_font.setBold(True)
+        title_font.setPointSizeF(max(8.0, title_font.pointSizeF() - 1.0))
+        painter.setFont(title_font)
+        painter.setPen(text_color)
+        painter.drawText(QRect(14, 10, self.width() - 28, 17), Qt.AlignmentFlag.AlignLeft, "POINT DENSITY")
+        gradient = QLinearGradient(14, 38, self.width() - 14, 38)
+        viewport = self._viewport_background
+        stops = (
+            density_color_stops(*self._gradient_colors)
+            if self._gradient_colors is not None
+            else density_color_stops((viewport.red(), viewport.green(), viewport.blue()))
+        )
+        for position, color in zip(np.linspace(0.0, 1.0, len(stops)), stops):
+            gradient.setColorAt(float(position), QColor(*[int(component) for component in color]))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(QRectF(14, 35, self.width() - 28, 14), 6, 6)
+        label_font = painter.font()
+        label_font.setBold(False)
+        label_font.setPointSizeF(max(8.0, label_font.pointSizeF() - 1.0))
+        painter.setFont(label_font)
+        painter.setPen(text_color)
+        painter.drawText(QRect(14, 54, 90, 16), Qt.AlignmentFlag.AlignLeft, "Sparse")
+        painter.drawText(QRect(self.width() - 104, 54, 90, 16), Qt.AlignmentFlag.AlignRight, "Dense")
+
+
 class ArrowComboBox(QComboBox):
-    """Combo box with a theme-independent dropdown chevron."""
+    """Combo box with a chevron that follows the active appearance palette."""
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#0B1B34" if self.isEnabled() else "#9CA3AF"))
+        text_color = self.palette().color(QPalette.ColorRole.Text)
+        if not self.isEnabled():
+            text_color.setAlpha(120)
+        painter.setBrush(text_color)
         center_x = self.width() - 13
         center_y = self.height() // 2 + 1
         painter.drawPolygon(
@@ -698,10 +1237,14 @@ class TooltipPopup(QLabel):
         self.setWordWrap(True)
         self.setMaximumWidth(520)
         self.setMargin(9)
+        self.apply_appearance(DEFAULT_APPEARANCE)
+
+    def apply_appearance(self, name: str) -> None:
+        theme = appearance_theme(name)
         self.setStyleSheet(
             "QLabel#meshmillTooltip {"
-            "background-color: #FFFFFF; color: #0B1B34; "
-            "border: 1px solid #2563FF; border-radius: 5px; "
+            f"background-color: {theme['panel']}; color: {theme['text']}; "
+            f"border: 1px solid {theme['accent']}; border-radius: 7px; "
             "font-size: 12px; font-weight: 500;"
             "}"
         )
@@ -724,7 +1267,7 @@ class TooltipPopup(QLabel):
 
 
 class DeferredTooltipFilter(QObject):
-    """Quiet, two-second, movement-sensitive help without changing the cursor."""
+    """Quiet, one-second, movement-sensitive help without changing the cursor."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -732,9 +1275,12 @@ class DeferredTooltipFilter(QObject):
         self.position = QPoint()
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
-        self.timer.setInterval(2000)
+        self.timer.setInterval(1000)
         self.timer.timeout.connect(self._show)
         self.popup = TooltipPopup()
+
+    def apply_appearance(self, name: str) -> None:
+        self.popup.apply_appearance(name)
 
     def eventFilter(self, watched, event) -> bool:
         if not isinstance(watched, QWidget) or not watched.toolTip():
@@ -803,6 +1349,8 @@ class GeometryActivityGraph(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.samples: list[tuple[float, float, bool]] = []
+        self.max_samples = 1800
+        self.pixels_per_sample = 2
         self.operation = "Idle"
         self.geometry_text = "No mesh loaded"
         self.setFixedHeight(112)
@@ -819,13 +1367,25 @@ class GeometryActivityGraph(QWidget):
         cpu = max(0.0, min(100.0, cpu))
         gpu = max(0.0, min(100.0, gpu))
         self.samples.append((cpu, gpu, processing))
-        self.samples = self.samples[-120:]
+        self.samples = self.samples[-self.max_samples:]
+        self.setFixedWidth(max(240, round(len(self.samples) * self.pixels_per_sample + 16)))
         self.operation = operation
         self.geometry_text = (
             f"{fmt_count(points)} vertices / {fmt_count(triangles)} triangles"
             if points or triangles
             else "No mesh loaded"
         )
+        self.update()
+
+    def configure_history(
+        self, refresh_ms: int, minutes: int, visible_seconds: int = 30, viewport_width: int = 0
+    ) -> None:
+        self.max_samples = max(1, math.ceil(minutes * 60_000 / max(1, refresh_ms)))
+        self.samples = self.samples[-self.max_samples:]
+        visible_samples = max(1, math.ceil(visible_seconds * 1000 / max(1, refresh_ms)))
+        width = max(240, viewport_width)
+        self.pixels_per_sample = max(2.0, width / visible_samples)
+        self.setFixedWidth(max(width, round(len(self.samples) * self.pixels_per_sample + 16)))
         self.update()
 
     def paintEvent(self, _event) -> None:
@@ -835,8 +1395,15 @@ class GeometryActivityGraph(QWidget):
         painter.setPen(QColor("#0B1B34"))
         painter.drawText(8, 15, f"Geometry activity · {self.operation} · {self.geometry_text}")
 
+        painter.fillRect(QRect(8, 0, max(1, self.width() - 16), 20), QColor("#FFFFFF"))
+        painter.setPen(QColor("#0B1B34"))
+        painter.drawText(
+            QRect(8, 0, max(1, self.width() - 16), 20),
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            f"Geometry activity / {self.operation} / {self.geometry_text}",
+        )
+
         left, top, right, bottom = 8, 23, self.width() - 8, self.height() - 19
-        width = max(1, right - left)
         height = max(1, bottom - top)
         painter.setPen(QPen(QColor("#E4E1DC"), 1))
         for fraction in (0.25, 0.5, 0.75):
@@ -844,11 +1411,12 @@ class GeometryActivityGraph(QWidget):
             painter.drawLine(left, round(y), right, round(y))
 
         if self.samples:
-            step = width / max(1, len(self.samples) - 1)
+            step = self.pixels_per_sample
+            start_x = max(left, right - step * max(0, len(self.samples) - 1))
             active_color = QColor(37, 99, 255, 30)
             for index, (_, _, active) in enumerate(self.samples):
                 if active:
-                    x = left + index * step
+                    x = start_x + index * step
                     painter.fillRect(
                         round(x - max(1.0, step) / 2),
                         top,
@@ -860,7 +1428,7 @@ class GeometryActivityGraph(QWidget):
             def draw_line(values: list[float], color: str) -> None:
                 points = QPolygonF(
                     [
-                        QPointF(left + index * step, bottom - height * value / 100.0)
+                        QPointF(start_x + index * step, bottom - height * value / 100.0)
                         for index, value in enumerate(values)
                     ]
                 )
@@ -876,6 +1444,19 @@ class GeometryActivityGraph(QWidget):
         painter.drawText(38, self.height() - 5, "GPU")
         painter.setPen(QColor("#6B7280"))
         painter.drawText(70, self.height() - 5, "geometry processing")
+        painter.fillRect(QRect(0, self.height() - 18, self.width(), 18), QColor("#FFFFFF"))
+        legend_y = self.height() - 5
+        right_edge = self.width() - 8
+        metrics = painter.fontMetrics()
+        for text, color in (
+            ("geometry processing", "#6B7280"),
+            ("GPU", "#8FCB33"),
+            ("CPU", "#2563FF"),
+        ):
+            painter.setPen(QColor(color))
+            text_width = metrics.horizontalAdvance(text)
+            painter.drawText(right_edge - text_width, legend_y, text)
+            right_edge -= text_width + 10
 
 
 def fmt_count(value: int) -> str:
@@ -1078,6 +1659,31 @@ def load_binary_stl_overview(
     return arrays_polydata(points, faces), points, faces
 
 
+def tiled_runtime_break_even(
+    triangle_count: int,
+    algorithm: str,
+    index_ready: bool,
+) -> tuple[float, float, float] | None:
+    """Estimate full versus tiled Fast QEM time from the reference workload.
+
+    The estimate is intentionally limited to the CPU Fast QEM path that has a
+    matched full-mesh/tiled measurement.  GPU-guided surface analysis currently
+    runs independently in every tile, so its tiled result is not used for an
+    automatic choice.
+    """
+    if triangle_count <= 0 or algorithm != "Fast QEM":
+        return None
+
+    # 4,126,315-triangle reference mesh, matched target, eight CPU workers.
+    full_seconds_per_triangle = 8.58 / 4_126_315
+    tiled_seconds_per_triangle = 4.67 / 4_126_315
+    cold_index_seconds = 14.6
+    full_seconds = triangle_count * full_seconds_per_triangle
+    tiled_seconds = triangle_count * tiled_seconds_per_triangle
+    setup_seconds = 0.0 if index_ready else cold_index_seconds
+    return full_seconds, tiled_seconds + setup_seconds, setup_seconds
+
+
 def load_stl_smart(
     path: Path,
     mode: str,
@@ -1085,6 +1691,9 @@ def load_stl_smart(
     overview_triangle_limit: int,
     cancel_event: threading.Event | None = None,
     analysis_workers: int | None = None,
+    progress_callback: Callable[[str, int, int], None] | None = None,
+    algorithm: str = "Fast QEM",
+    allow_auto_tiling: bool = True,
 ) -> tuple[vtkPolyData, np.ndarray, np.ndarray, dict]:
     triangle_count = binary_stl_triangle_count(path)
     estimated_memory = (
@@ -1092,7 +1701,23 @@ def load_stl_smart(
         if triangle_count is not None
         else path.stat().st_size * 5
     )
-    use_overview = mode == "overview" or (
+    index_directory = default_index_directory(path)
+    try:
+        cached_manifest = load_manifest(index_directory)
+        index_ready = index_matches(path, cached_manifest)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        cached_manifest = None
+        index_ready = False
+    break_even = tiled_runtime_break_even(triangle_count or 0, algorithm, index_ready)
+    use_auto_tiles = bool(
+        mode == "auto"
+        and allow_auto_tiling
+        and estimated_memory <= memory_budget_bytes
+        and break_even is not None
+        and break_even[1] < break_even[0]
+    )
+    use_tiled = mode == "tiled" or use_auto_tiles
+    use_overview = mode == "overview" or use_tiled or (
         mode == "auto" and estimated_memory > memory_budget_bytes
     )
     if use_overview:
@@ -1105,18 +1730,15 @@ def load_stl_smart(
         poly, points, faces = load_binary_stl_overview(
             path, triangle_count, overview_triangle_limit
         )
-        index_directory = default_index_directory(path)
-        try:
-            manifest = load_manifest(index_directory)
-        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-            manifest = None
-        if manifest is None or not index_matches(path, manifest):
+        manifest = cached_manifest
+        if manifest is None or not index_ready:
             manifest = build_index(
                 path,
                 index_directory,
                 target_triangles_per_tile=max(262_144, overview_triangle_limit),
                 cancel_event=cancel_event,
                 analysis_workers=analysis_workers,
+                progress_callback=progress_callback,
             )
         return poly, points, faces, {
             "overview": True,
@@ -1125,6 +1747,9 @@ def load_stl_smart(
             "index_directory": os.fspath(index_directory),
             "index_tiles": len(manifest.tiles),
             "index_max_depth": manifest.max_depth,
+            "tiled_edit": use_tiled,
+            "tiled_auto_selected": use_auto_tiles,
+            "tiled_runtime_estimate": break_even,
         }
     poly, points, faces = load_stl(path)
     return poly, points, faces, {
@@ -1688,11 +2313,30 @@ class MeshInteractorStyle(vtkInteractorStyleTrackballCamera):
         self.OnKeyRelease()
 
 
-def mesh_surface_area(points: np.ndarray, faces: np.ndarray) -> float:
-    a = points[faces[:, 0]]
-    b = points[faces[:, 1]]
-    c = points[faces[:, 2]]
-    return float((0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)).sum())
+def mesh_surface_area(
+    points: np.ndarray,
+    faces: np.ndarray,
+    progress: Callable[[int, int], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> float:
+    """Return mesh area in bounded batches so long runs can report progress."""
+    face_count = len(faces)
+    if not face_count:
+        return 0.0
+    batch_size = 200_000
+    area = 0.0
+    for start in range(0, face_count, batch_size):
+        if cancel_event is not None and cancel_event.is_set():
+            raise OperationCancelled
+        stop = min(start + batch_size, face_count)
+        batch = faces[start:stop]
+        a = points[batch[:, 0]]
+        b = points[batch[:, 1]]
+        c = points[batch[:, 2]]
+        area += float((0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)).sum())
+        if progress is not None:
+            progress(stop, face_count)
+    return area
 
 
 def mesh_quality_metrics(
@@ -1701,6 +2345,8 @@ def mesh_quality_metrics(
     output_points: np.ndarray,
     output_faces: np.ndarray,
     sample_count: int = 20_000,
+    progress: Callable[[str, int, int], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, float]:
     """Calculate compact, deterministic quality indicators for the Stats panel."""
     if not len(source_points) or not len(output_points):
@@ -1708,25 +2354,76 @@ def mesh_quality_metrics(
     rng = np.random.default_rng(20261005)
     sample_size = min(sample_count, len(source_points))
     samples = source_points[rng.choice(len(source_points), sample_size, replace=False)]
+    if progress is not None:
+        progress("Preparing result analysis", 0, 1)
     output_poly = arrays_polydata(output_points, output_faces)
     locator = vtkStaticPointLocator()
     locator.SetDataSet(output_poly)
     locator.BuildLocator()
+    if progress is not None:
+        progress("Preparing result analysis", 1, 1)
+        progress("Analyzing results", 0, sample_size)
     vtk_output_points = output_poly.GetPoints()
     distances = np.empty(sample_size, dtype=np.float64)
+    progress_interval = max(1, sample_size // 100)
     for index, sample in enumerate(samples):
+        if cancel_event is not None and cancel_event.is_set():
+            raise OperationCancelled
         closest = vtk_output_points.GetPoint(locator.FindClosestPoint(sample))
         distances[index] = np.linalg.norm(sample - closest)
+        if progress is not None and (
+            (index + 1) % progress_interval == 0 or index + 1 == sample_size
+        ):
+            progress("Analyzing results", index + 1, sample_size)
+    area_total = len(source_faces) + len(output_faces)
+    if progress is not None:
+        progress("Measuring surface area", 0, max(area_total, 1))
     source_bounds = source_points.max(axis=0) - source_points.min(axis=0)
     output_bounds = output_points.max(axis=0) - output_points.min(axis=0)
     diagonal = max(float(np.linalg.norm(source_bounds)), 1e-12)
-    source_area = max(mesh_surface_area(source_points, source_faces), 1e-12)
-    output_area = mesh_surface_area(output_points, output_faces)
+    source_area = max(
+        mesh_surface_area(
+            source_points,
+            source_faces,
+            progress=(
+                lambda completed, total: progress("Measuring surface area", completed, area_total)
+                if progress is not None
+                else None
+            ),
+            cancel_event=cancel_event,
+        ),
+        1e-12,
+    )
+    output_area = mesh_surface_area(
+        output_points,
+        output_faces,
+        progress=(
+            lambda completed, total: progress(
+                "Measuring surface area", len(source_faces) + completed, area_total
+            )
+            if progress is not None
+            else None
+        ),
+        cancel_event=cancel_event,
+    )
+    topology_total = max(4 * len(output_faces), 1)
+    if progress is not None:
+        progress("Preparing topology edges", 0, topology_total)
     edges = np.concatenate(
         (output_faces[:, [0, 1]], output_faces[:, [1, 2]], output_faces[:, [2, 0]])
     )
+    if cancel_event is not None and cancel_event.is_set():
+        raise OperationCancelled
+    if progress is not None:
+        progress("Preparing topology edges", len(edges), topology_total)
     edges.sort(axis=1)
+    if cancel_event is not None and cancel_event.is_set():
+        raise OperationCancelled
+    if progress is not None:
+        progress("Sorting topology edges", int(3.5 * len(output_faces)), topology_total)
     _, edge_counts = np.unique(edges, axis=0, return_counts=True)
+    if progress is not None:
+        progress("Checking mesh topology", topology_total, topology_total)
     return {
         "reduction_percent": 100.0 * (1.0 - len(output_faces) / len(source_faces)),
         "rms_percent": 100.0 * float(np.sqrt(np.mean(distances * distances))) / diagonal,
@@ -1751,11 +2448,17 @@ def mesh_quality_baseline(
     profile = {
         "Fast QEM": (0.22, 0.55, 0.030, 0.18, 0.040),
         "Depth Adaptive QEM": (0.16, 0.40, 0.020, 0.12, 0.030),
+        "Depth + Density Adaptive QEM": (0.13, 0.30, 0.001, 0.01, 0.005),
         "Density balanced": (0.28, 0.70, 0.050, 0.22, 0.050),
         "Shape preserving": (0.19, 0.48, 0.025, 0.15, 0.035),
         "Preserve topology": (0.24, 0.60, 0.030, 0.18, 0.010),
     }
-    profile_key = "Depth Adaptive QEM" if algorithm.startswith("Depth Adaptive QEM") else algorithm
+    if algorithm == DEPTH_DENSITY_ADAPTIVE_LABEL:
+        profile_key = "Depth + Density Adaptive QEM"
+    elif algorithm.startswith("Depth Adaptive QEM"):
+        profile_key = "Depth Adaptive QEM"
+    else:
+        profile_key = algorithm
     rms, p95, drift, area, topology = profile.get(profile_key, profile["Fast QEM"])
     quality_factor = {"Draft": 1.20, "Balanced": 1.0, "Fine": 0.82}.get(quality, 1.0)
     severity = reduction * reduction * quality_factor
@@ -1785,10 +2488,55 @@ def smart_target(points: np.ndarray, faces: np.ndarray, quality: str) -> int:
     return max(10_000, min(upper, estimate))
 
 
+def density_color_stops(
+    base_color: tuple[int, int, int] | None = None,
+    dense_color: tuple[int, int, int] | None = None,
+) -> np.ndarray:
+    """Build the density ramp from the active viewport color.
+
+    The sparse end follows the viewport hue, then rapidly returns to the
+    brighter density ramp used by the original display.
+    """
+    base = np.asarray(base_color or (11, 27, 52), dtype=np.float64)
+    if dense_color is not None:
+        dense = np.asarray(dense_color, dtype=np.float64)
+        sparse_qcolor = QColor(*[int(component) for component in base])
+        dense_qcolor = QColor(*[int(component) for component in dense])
+        sparse_hue, sparse_saturation, sparse_value, _ = sparse_qcolor.getHsvF()
+        dense_hue, dense_saturation, dense_value, _ = dense_qcolor.getHsvF()
+        weights = np.linspace(0.0, 1.0, 9)
+        if sparse_hue >= 0.0 and dense_hue >= 0.0:
+            # Preserve the visual direction chosen by the endpoints. Blue to red
+            # therefore crosses cyan, green, yellow, and orange instead of fading
+            # through purple as a shortest-path hue interpolation would.
+            colors = []
+            for weight in weights:
+                color = QColor.fromHsvF(
+                    sparse_hue * (1.0 - weight) + dense_hue * weight,
+                    sparse_saturation * (1.0 - weight) + dense_saturation * weight,
+                    sparse_value * (1.0 - weight) + dense_value * weight,
+                )
+                colors.append((color.red(), color.green(), color.blue()))
+            return np.asarray(colors, dtype=np.float64)
+        return np.asarray(
+            [base * (1.0 - weight) + dense * weight for weight in weights],
+            dtype=np.float64,
+        )
+    sparse = np.minimum(255.0, base * 1.55 + 8.0)
+    sparse_mid = np.minimum(255.0, base * 2.20 + 18.0)
+    return np.asarray(
+        [sparse, sparse_mid, [35, 190, 226], [167, 227, 75], [250, 204, 21], [226, 55, 48]],
+        dtype=np.float64,
+    )
+
+
 def point_density_colors(
     points: np.ndarray,
     faces: np.ndarray,
     cancel_event: threading.Event | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
+    base_color: tuple[int, int, int] | None = None,
+    dense_color: tuple[int, int, int] | None = None,
 ) -> np.ndarray:
     """Return RGB colors from smoothed local spacing and robust log-density z-scores."""
     point_count = len(points)
@@ -1806,6 +2554,8 @@ def point_density_colors(
         incident_area += np.bincount(
             chunk.ravel(), weights=np.repeat(area, 3), minlength=point_count
         ).astype(np.float32, copy=False)
+        if progress is not None:
+            progress("Measuring triangle density", start + len(chunk), len(faces))
 
     valid = (incident_count > 0) & (incident_area > 0)
     log_density = np.zeros(point_count, dtype=np.float32)
@@ -1831,6 +2581,8 @@ def point_density_colors(
         neighbor_count += np.bincount(destinations, minlength=point_count).astype(
             np.float32, copy=False
         )
+        if progress is not None:
+            progress("Smoothing density regions", start + len(chunk), len(faces))
     smoothed = np.divide(
         log_density + neighbor_sum,
         1.0 + neighbor_count,
@@ -1853,16 +2605,18 @@ def point_density_colors(
         normalized = np.maximum(bell_curve, 0.80 * rank_contrast)
         normalized[~valid] = 0.0
 
-    stops = np.asarray(
-        [[18, 48, 112], [25, 154, 214], [87, 224, 184], [250, 204, 21], [226, 55, 48]],
-        dtype=np.float64,
-    )
+    if progress is not None:
+        progress("Coloring density regions", 0, 1)
+    stops = density_color_stops(base_color, dense_color)
     scaled = normalized * (len(stops) - 1)
     lower = np.minimum(scaled.astype(np.int32), len(stops) - 2)
     blend = (scaled - lower)[:, None]
-    return np.ascontiguousarray(
+    colors = np.ascontiguousarray(
         np.rint(stops[lower] * (1.0 - blend) + stops[lower + 1] * blend).astype(np.uint8)
     )
+    if progress is not None:
+        progress("Coloring density regions", 1, 1)
+    return colors
 
 
 def point_density_cell_colors(
@@ -1907,11 +2661,22 @@ def simplify_arrays(
     algorithm: str,
     aggressiveness: float = 7.0,
     gpu_preference: str = "system",
+    progress: Callable[[str, int, int], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     reduction = 1.0 - target / len(faces)
-    if algorithm.startswith("Depth Adaptive QEM"):
+    if algorithm == DEPTH_DENSITY_ADAPTIVE_LABEL:
+        output_points, output_faces, _report = simplify_depth_density_adaptive_qem(
+            points, faces, target, aggressiveness, gpu_preference, progress=progress
+        )
+        return output_points, output_faces
+    if algorithm == DEPTH_ADAPTIVE_LABEL or algorithm == "Depth Adaptive QEM":
         output_points, output_faces, _report = simplify_depth_adaptive_qem(
-            points, faces, target, max(8.0, aggressiveness), gpu_preference
+            points,
+            faces,
+            target,
+            max(8.0, aggressiveness),
+            gpu_preference,
+            progress=progress,
         )
         return output_points, output_faces
     if algorithm == "Fast QEM":
@@ -1939,15 +2704,38 @@ def simplify_arrays(
     return polydata_arrays(decimator.GetOutput())
 
 
+def _write_process_progress(
+    progress_path: str | None, stage: str, completed: int = 0, total: int = 0
+) -> None:
+    if not progress_path:
+        return
+    try:
+        Path(progress_path).write_text(
+            json.dumps({"stage": stage, "completed": completed, "total": total}),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def simplify_process_job(
-    points, faces, target: int, algorithm: str, gpu_preference: str = "system"
+    points,
+    faces,
+    target: int,
+    algorithm: str,
+    gpu_preference: str = "system",
+    progress_path: str | None = None,
 ):
     """Run native simplification outside the UI process."""
     try:
-        p_out, f_out = simplify_arrays(
-            points, faces, target, algorithm, gpu_preference=gpu_preference
+        report = lambda stage, completed, total: _write_process_progress(
+            progress_path, stage, completed, total
         )
-        metrics = mesh_quality_metrics(points, faces, p_out, f_out)
+        p_out, f_out = simplify_arrays(
+            points, faces, target, algorithm, gpu_preference=gpu_preference, progress=report
+        )
+        metrics = mesh_quality_metrics(points, faces, p_out, f_out, progress=report)
+        report("Preparing optimized mesh", 1, 1)
         return p_out, f_out, metrics, None
     except Exception:  # noqa: BLE001 - worker boundary returns tracebacks to the UI process
         return None, None, None, traceback.format_exc()
@@ -1963,22 +2751,45 @@ def cli_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="MeshMillCLI",
         description="Optimize an STL locally without changing its coordinate scale.",
+        epilog=(
+            "Examples:\n"
+            "  MeshMillCLI input.stl --quality balanced\n"
+            "  MeshMillCLI input.stl --target 150000 --output reduced.stl\n"
+            "  MeshMillCLI input.stl --algorithm depth-adaptive --gpu 00000000:01:00.0\n\n"
+            "Without --target, --quality, or --preset, MeshMill derives a Balanced target from "
+            "the input mesh."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {APP_VERSION}")
     parser.add_argument("input", type=Path, help="Input STL file")
     parser.add_argument("-o", "--output", type=Path, help="Output STL filename")
     choice = parser.add_mutually_exclusive_group()
     choice.add_argument("-t", "--target", type=int, help="Target triangle count")
     choice.add_argument(
-        "-p", "--preset", choices=sorted(PRESETS), default="balanced",
-        help="light=50k, balanced=200k, detailed=400k (default: balanced)",
+        "-q", "--quality", choices=("draft", "balanced", "fine"),
+        help="Derive the target from mesh size and detail level (default: balanced)",
+    )
+    choice.add_argument(
+        "-p", "--preset", choices=sorted(PRESETS),
+        help="Use a fixed legacy target: light=50k, balanced=200k, detailed=400k",
     )
     parser.add_argument(
         "-a", "--aggressiveness", type=float, default=7.0,
         help="0 favors quality, 7 is balanced, 10 favors speed (default: 7)",
     )
     parser.add_argument(
-        "--algorithm", choices=sorted(CLI_ALGORITHMS), default="fast",
-        help="available reduction algorithm (default: fast)",
+        "--algorithm",
+        choices=["auto", *sorted(CLI_ALGORITHMS)],
+        default="auto",
+        help=(
+            "reduction algorithm (default: auto selects Depth + Density Adaptive QEM "
+            "when GPU support is available, otherwise Density balanced)"
+        ),
+    )
+    parser.add_argument(
+        "--gpu", default="system", metavar="PCI_BUS_ID",
+        help="CUDA GPU PCI bus ID for GPU-guided algorithms, or system (default: system)",
     )
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output file")
     args = parser.parse_args(argv)
@@ -1988,11 +2799,28 @@ def cli_main(argv: list[str]) -> int:
         parser.error(f"input file does not exist: {source}")
     if source.suffix.lower() != ".stl":
         parser.error("input must be an STL file")
-    target = args.target if args.target is not None else PRESETS[args.preset]
-    if target < 1_000:
-        parser.error("target must be at least 1000 triangles")
     if not 0 <= args.aggressiveness <= 10:
         parser.error("aggressiveness must be between 0 and 10")
+
+    print(f"Loading: {source}", flush=True)
+    poly, points, faces = load_stl(source)
+    original_count = len(faces)
+    original_size = np.asarray(bounds_size(poly.GetBounds()))
+    print(f"Original: {original_count:,} triangles", flush=True)
+    print(f"Dimensions: {fmt_size(tuple(original_size))}", flush=True)
+    quality = (args.quality or "balanced").title()
+    target = (
+        args.target
+        if args.target is not None
+        else PRESETS[args.preset]
+        if args.preset is not None
+        else min(smart_target(points, faces, quality), max(1, original_count - 1))
+    )
+    if target < 1_000:
+        parser.error("target must be at least 1000 triangles")
+    if target >= original_count:
+        parser.error(f"target {target:,} is not smaller than the source ({original_count:,})")
+
     output = args.output
     if output is None:
         output = source.with_name(f"{source.stem}_{target // 1000}k.stl")
@@ -2004,29 +2832,30 @@ def cli_main(argv: list[str]) -> int:
         parser.error(f"output already exists: {output} (use --overwrite to replace it)")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading: {source}", flush=True)
-    poly, points, faces = load_stl(source)
-    original_count = len(faces)
-    original_size = np.asarray(bounds_size(poly.GetBounds()))
-    print(f"Original: {original_count:,} triangles", flush=True)
-    print(f"Dimensions: {fmt_size(tuple(original_size))}", flush=True)
-    if target >= original_count:
-        parser.error(f"target {target:,} is not smaller than the source ({original_count:,})")
-
+    selected_algorithm = (
+        default_algorithm(args.gpu) if args.algorithm == "auto" else CLI_ALGORITHMS[args.algorithm]
+    )
+    if is_gpu_guided_algorithm(selected_algorithm) and not gpu_backend_supported(args.gpu):
+        parser.error(
+            "the selected GPU-guided algorithm requires a compatible NVIDIA CUDA GPU and runtime"
+        )
     print(
         f"Optimizing to about {target:,} triangles "
         f"(aggressiveness {args.aggressiveness:g})...",
         flush=True,
     )
-    if CLI_ALGORITHMS[args.algorithm].startswith("Depth Adaptive QEM"):
+    if selected_algorithm in (
+        DEPTH_ADAPTIVE_LABEL,
+        DEPTH_DENSITY_ADAPTIVE_LABEL,
+    ):
         print(
             "First-time GPU setup: preparing and caching kernels (one-time setup)..."
-            if first_time_gpu_setup_needed()
+            if first_time_gpu_setup_needed(args.gpu)
             else "Analyzing surface on GPU...",
             flush=True,
         )
     reduced_points, reduced_faces = simplify_arrays(
-        points, faces, target, CLI_ALGORITHMS[args.algorithm], args.aggressiveness
+        points, faces, target, selected_algorithm, args.aggressiveness, args.gpu
     )
     reduced = arrays_polydata(reduced_points, reduced_faces)
     reduced_size = np.asarray(bounds_size(reduced.GetBounds()))
@@ -2061,6 +2890,52 @@ class MainWindow(QMainWindow):
         self.update_install_future = None
         self.locale_preference = str(self.settings.value("interface/locale", "system"))
         self.locale_code = locale_manager.select(self._resolved_locale(self.locale_preference))
+        self.appearance_theme_name = str(
+            self.settings.value("interface/appearance_theme", DEFAULT_APPEARANCE)
+        )
+        if self.appearance_theme_name not in APPEARANCE_THEMES:
+            self.appearance_theme_name = DEFAULT_APPEARANCE
+        self.font_size_position = max(
+            0, min(4, self.settings.value("interface/font_size_position", 1, type=int))
+        )
+        metrics_default_version = self.settings.value("metrics/default_version", 0, type=int)
+        self.metrics_refresh_ms = max(
+            250,
+            min(
+                5000,
+                1000 if metrics_default_version < 1 else self.settings.value(
+                    "metrics/refresh_ms", 1000, type=int
+                ),
+            ),
+        )
+        self.metrics_history_minutes = max(
+            1, min(120, self.settings.value("metrics/history_minutes", 15, type=int))
+        )
+        self.metrics_visible_seconds = max(
+            10,
+            min(
+                300,
+                300 if metrics_default_version < 2 else self.settings.value(
+                    "metrics/visible_seconds", 300, type=int
+                ),
+            ),
+        )
+        viewport_default_version = self.settings.value(
+            "interface/viewport_appearance_version", 0, type=int
+        )
+        self.viewport_appearance_name = str(
+            self.settings.value("interface/viewport_appearance", DEFAULT_APPEARANCE)
+        )
+        if viewport_default_version < 1 and self.viewport_appearance_name == "match":
+            self.viewport_appearance_name = DEFAULT_APPEARANCE
+        if self.viewport_appearance_name not in {"match", "custom", *APPEARANCE_THEMES}:
+            self.viewport_appearance_name = "match"
+        self.custom_density_gradient_left = str(
+            self.settings.value("interface/density_gradient_left", "#174A82")
+        )
+        self.custom_density_gradient_right = str(
+            self.settings.value("interface/density_gradient_right", "#E23730")
+        )
         self.shortcuts = {
             shortcut_id: QKeySequence(
                 str(self.settings.value(f"shortcuts/{shortcut_id}", default_sequence))
@@ -2068,12 +2943,23 @@ class MainWindow(QMainWindow):
             for shortcut_id, (_label, default_sequence) in SHORTCUT_DEFINITIONS.items()
         }
         self.setWindowTitle(APP_NAME)
-        self.setStyleSheet(APP_STYLESHEET)
+        self._apply_appearance()
         icon_path = resource_path("assets/meshmill-mark.svg")
         if icon_path.exists():
             self.setWindowIcon(QIcon(os.fspath(icon_path)))
         self.resize(1180, 780)
         self.tools_side = str(self.settings.value("interface/tools_side", "Right"))
+        self.viewport_overlay_visible = {
+            key: self.settings.value(f"interface/overlay_{key}_visible", True, type=bool)
+            for key in VIEWPORT_OVERLAYS
+        }
+        self.viewport_overlay_corners = {
+            key: str(
+                self.settings.value(f"interface/overlay_{key}_corner", default_corner)
+            )
+            for key, (_label, default_corner) in VIEWPORT_OVERLAYS.items()
+        }
+        self._normalize_viewport_overlay_corners()
         units_default_version = self.settings.value("interface/units_default_version", 0, type=int)
         self.default_units = (
             "cm"
@@ -2085,8 +2971,11 @@ class MainWindow(QMainWindow):
         self.settings.setValue("interface/default_units", self.default_units)
         self.settings.setValue("interface/units_default_version", 2)
         self.large_mesh_mode = str(self.settings.value("performance/large_mesh_mode", "auto"))
-        if self.large_mesh_mode not in {"auto", "full", "overview"}:
+        if self.large_mesh_mode not in {"auto", "full", "overview", "tiled"}:
             self.large_mesh_mode = "auto"
+        self.auto_tiling_enabled = self.settings.value(
+            "performance/auto_tiling_enabled", True, type=bool
+        )
         saved_memory_percent = self.settings.value(
             "performance/memory_percent", 50, type=int
         )
@@ -2096,6 +2985,23 @@ class MainWindow(QMainWindow):
         self.geometry_processes = max(
             0, self.settings.value("performance/geometry_processes", 0, type=int)
         )
+        self.startup_algorithm = str(
+            self.settings.value("optimization/startup_algorithm", "last")
+        )
+        self.last_algorithm = str(
+            self.settings.value(
+                "optimization/last_algorithm",
+                default_algorithm(self.gpu_preference),
+            )
+        )
+        self.startup_quality = str(
+            self.settings.value("optimization/startup_quality", "last")
+        )
+        self.last_quality = str(
+            self.settings.value("optimization/last_quality", "Balanced")
+        )
+        if self.last_quality not in SMART_DIVISORS:
+            self.last_quality = "Balanced"
         legacy_mouse = self.settings.value("navigation/invert_mouse", False, type=bool)
         legacy_keyboard = self.settings.value("navigation/invert_keyboard", False, type=bool)
         legacy_horizontal = self.settings.value(
@@ -2149,6 +3055,21 @@ class MainWindow(QMainWindow):
         self.operation_cancel_event: threading.Event | None = None
         self.operation_future = None
         self.operation_uses_process = False
+        self.operation_progress_path: Path | None = None
+        self.operation_progress_stage = ""
+        self.operation_steps: list[str] = []
+        self.operation_step_index = 0
+        self.operation_runtime_started_at = 0.0
+        self.operation_runtime_stage_started_at = 0.0
+        self.operation_runtime_stage = ""
+        self.operation_runtime_seconds: dict[str, float] = {}
+        self.last_operation_runtime: dict[str, float] = {}
+        self.last_operation_name = ""
+        self.runtime_aggregate_seconds: dict[str, float] = {}
+        self.runtime_aggregate_counts: dict[str, int] = {}
+        self.runtime_operation_count = 0
+        self.runtime_total_seconds = 0.0
+        self._last_loading_metric_refresh = 0.0
         self.load_generation = 0
         self.edit_generation = 0
         self.density_generation = 0
@@ -2156,6 +3077,8 @@ class MainWindow(QMainWindow):
         self.resident_vertex_buffers = {}
         self.pending_density_poly: vtkPolyData | None = None
         self.load_started_at = 0.0
+        self.load_geometry_ready = False
+        self.gpu_warmup_future = None
         self.geometry_activity_until = 0.0
         self.geometry_activity_label = "Idle"
         self.pending_target: int | None = None
@@ -2166,8 +3089,13 @@ class MainWindow(QMainWindow):
         self.mesh_modified = False
         self.control_key_held = False
         self.saved_standard_views: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self.orientation_reference_basis: np.ndarray | None = None
         self.has_committed_optimization = False
+        self.optimization_script_passes: list[dict[str, object]] = []
+        self.optimization_script_omissions: list[str] = []
         self.overview_mode = False
+        self.tiled_mode = False
+        self.tiled_index_directory: Path | None = None
         self.overview_total_triangles = 0
         self.crop_start: QPoint | None = None
         self.crop_candidate: tuple[vtkPolyData, np.ndarray, np.ndarray, np.ndarray] | None = None
@@ -2218,7 +3146,9 @@ class MainWindow(QMainWindow):
         self._io_active_seconds = 0.0
         self._peak_read_sample = 0
         self._peak_write_sample = 0
+        self._capacity_available_memory = 0
         self.gpu_counters = WindowsGpuCounters()
+        self.cuda_counters = NvidiaSmiCounters()
         self.verification_screenshot: Path | None = None
         self.diagnostic_log_path: Path | None = None
         self._last_diagnostic_camera_time = 0.0
@@ -2250,10 +3180,31 @@ class MainWindow(QMainWindow):
         root = QWidget()
         root.setObjectName("mainRoot")
         self.setCentralWidget(root)
-        outer = QHBoxLayout(root)
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        app_header = QFrame(root)
+        app_header.setObjectName("appHeader")
+        app_header.setFixedHeight(30)
+        app_header_layout = QHBoxLayout(app_header)
+        app_header_layout.setContentsMargins(8, 2, 8, 2)
+        app_header_layout.addStretch(1)
+        self.fullscreen_button = QPushButton(app_header)
+        self.fullscreen_button.setObjectName("fullscreenButton")
+        self.fullscreen_button.setToolTip("Full screen (Ctrl+Enter)")
+        self.fullscreen_button.clicked.connect(self._toggle_full_screen)
+        self._set_theme_icon(self.fullscreen_button, "fullscreen")
+        app_header_layout.addWidget(self.fullscreen_button)
+        root_layout.addWidget(app_header)
+
+        content = QWidget(root)
+        root_layout.addWidget(content, 1)
+        outer = QHBoxLayout(content)
         self.outer_layout = outer
 
         controls = QScrollArea(root)
+        controls.setObjectName("toolboxScroll")
         self.controls_widget = controls
         controls.setWidgetResizable(True)
         controls.setFrameShape(QFrame.Shape.NoFrame)
@@ -2286,24 +3237,18 @@ class MainWindow(QMainWindow):
         brand_row = QHBoxLayout()
         brand_row.addStretch(1)
         brand_logo = QLabel()
+        self.brand_logo = brand_logo
         brand_logo.setFixedSize(310, 78)
         brand_logo.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        logo_path = resource_path("assets/meshmill-logo.svg")
-        if logo_path.exists():
-            brand_logo.setPixmap(
-                QPixmap(os.fspath(logo_path)).scaled(
-                    310,
-                    78,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+        self._refresh_brand_logo()
         brand_row.addWidget(brand_logo)
         panel.addLayout(brand_row)
 
         self.open_button = QPushButton("Open STL…")
         self.open_button.setProperty("accent", True)
+        self.open_button.setProperty("fileAction", True)
         self.open_button.clicked.connect(self.open_file)
+        self._set_theme_icon(self.open_button, "open")
 
         self.reload_button = QPushButton("Reload Original Mesh")
         self.reload_button.setProperty("quiet", True)
@@ -2328,18 +3273,31 @@ class MainWindow(QMainWindow):
         self.history_actions = QFrame()
         history_row = QHBoxLayout(self.history_actions)
         history_row.setContentsMargins(0, 0, 0, 0)
-        history_row.addWidget(self.undo_button)
-        history_row.addWidget(self.cancel_preview_button)
-        history_row.addWidget(self.redo_button)
+        history_row.setSpacing(6)
+        for button in (self.undo_button, self.cancel_preview_button, self.redo_button):
+            button.setMinimumWidth(72)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            history_row.addWidget(button)
 
-        def tool_section(title_text: str) -> tuple[QVBoxLayout, QHBoxLayout]:
+        def tool_section(
+            title_text: str, icon_name: str, tone: str
+        ) -> tuple[QVBoxLayout, QHBoxLayout]:
             frame = QFrame(controls_content)
             frame.setObjectName("toolSection")
+            frame.setProperty("sectionTone", tone)
             layout = QVBoxLayout(frame)
             layout.setContentsMargins(9, 7, 9, 9)
             layout.setSpacing(6)
             header = QHBoxLayout()
             header.setContentsMargins(0, 0, 0, 0)
+            header.setSpacing(7)
+            section_icon = QLabel(frame)
+            section_icon.setObjectName("sectionIcon")
+            section_icon.setProperty("iconTone", tone)
+            section_icon.setFixedSize(18, 18)
+            section_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._set_theme_icon(section_icon, icon_name)
+            header.addWidget(section_icon)
             heading = QLabel(title_text, frame)
             heading.setObjectName("sectionTitle")
             header.addWidget(heading)
@@ -2348,28 +3306,33 @@ class MainWindow(QMainWindow):
             panel.addWidget(frame)
             return layout, header
 
-        optimization_panel, _optimization_header = tool_section("OPTIMIZATION")
-        stats_panel, _stats_header = tool_section("STATS")
-        general_panel, general_header = tool_section("GENERAL")
+        optimization_panel, _optimization_header = tool_section("OPTIMIZATION", "optimize", "optimization")
+        stats_panel, _stats_header = tool_section("STATS", "stats", "stats")
+        general_panel, general_header = tool_section("GENERAL", "general", "general")
 
-        self.file_label = QLabel("No file loaded")
+        self.file_label = ElidedPathLabel("No file loaded")
         self.file_label.setObjectName("fileCard")
-        self.file_label.setWordWrap(True)
         self.file_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         file_row = QHBoxLayout()
         file_row.setSpacing(4)
         file_row.addWidget(self.file_label, 1)
         self.open_file_folder_button = QPushButton("📁")
-        self.open_file_folder_button.setFixedWidth(30)
+        self.open_file_folder_button.setFixedSize(34, 34)
         self.open_file_folder_button.setEnabled(False)
+        self.open_file_folder_button.setProperty("iconTone", "general")
         self.open_file_folder_button.setToolTip("Open the folder containing this STL.")
         self.open_file_folder_button.clicked.connect(self._open_source_folder)
+        self._set_theme_icon(self.open_file_folder_button, "folder")
+        self.open_file_folder_button.setText("")
         file_row.addWidget(self.open_file_folder_button)
         self.copy_file_path_button = QPushButton("⧉")
-        self.copy_file_path_button.setFixedWidth(30)
+        self.copy_file_path_button.setFixedSize(34, 34)
         self.copy_file_path_button.setEnabled(False)
+        self.copy_file_path_button.setProperty("iconTone", "optimization")
         self.copy_file_path_button.setToolTip("Copy the full STL path to the clipboard.")
         self.copy_file_path_button.clicked.connect(self._copy_source_path)
+        self._set_theme_icon(self.copy_file_path_button, "copy")
+        self.copy_file_path_button.setText("")
         file_row.addWidget(self.copy_file_path_button)
         stats_panel.addLayout(file_row)
 
@@ -2418,6 +3381,18 @@ class MainWindow(QMainWindow):
         stats.addWidget(field_label("Estimated output:", "Estimated binary STL size at the current target."), 8, 0)
         self.estimated_file_size = QLabel("—")
         stats.addWidget(self.estimated_file_size, 8, 1)
+        for value in (
+            self.original_count,
+            self.original_vertices,
+            self.preview_count,
+            self.preview_vertices,
+            self.drift,
+            self.optimization_ratio,
+            self.original_file_size,
+            self.estimated_file_size,
+        ):
+            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.dimensions.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
         stats_panel.addLayout(stats)
 
         quality_row = QHBoxLayout()
@@ -2455,19 +3430,10 @@ class MainWindow(QMainWindow):
             metric.setAlignment(Qt.AlignmentFlag.AlignCenter)
             metric.setToolTip(tr(quality_help_text[key]))
             metric.setMinimumWidth(38)
-            metric.setStyleSheet(
-                "color: #0B1B34; background: #FFFFFF; border: 1px solid #D8DCE5; "
-                "border-radius: 4px; padding: 3px 1px; font-size: 9px; font-weight: 600;"
-            )
+            metric.setObjectName("qualityMetric")
+            metric.setProperty("qualityMetric", True)
             quality_row.addWidget(metric, 1)
             self.quality_metric_labels[key] = metric
-        self.quality_metrics_state = QLabel("Quality estimate")
-        self.quality_metrics_state.setStyleSheet("color: #6B7280; font-size: 10px;")
-        self.quality_metrics_state.setToolTip(
-            "Before optimization, these values estimate the expected result. After optimization, "
-            "they are measured against the mesh used for that pass."
-        )
-        stats_panel.addWidget(self.quality_metrics_state)
         stats_panel.addLayout(quality_row)
 
         self.preview_button = QPushButton("Optimize")
@@ -2518,8 +3484,15 @@ class MainWindow(QMainWindow):
         )
         self.smart_quality = ArrowComboBox()
         self.smart_quality.addItems(list(SMART_DIVISORS))
-        self.smart_quality.setCurrentText("Balanced")
-        self.smart_quality.currentTextChanged.connect(self._apply_smart_target)
+        initial_quality = (
+            self.last_quality
+            if self.startup_quality == "last"
+            else self.startup_quality
+        )
+        if initial_quality not in SMART_DIVISORS:
+            initial_quality = "Balanced"
+        self.smart_quality.setCurrentText(initial_quality)
+        self.smart_quality.currentTextChanged.connect(self._smart_quality_changed)
         smart_row.addWidget(self.smart_quality, 1)
         optimization_panel.addLayout(smart_row)
 
@@ -2527,19 +3500,30 @@ class MainWindow(QMainWindow):
         algorithm_row.addWidget(field_label("Algorithm", "Geometry optimization method used for the next operation."))
         self.algorithm = ArrowComboBox()
         self.algorithm.addItems(ALGORITHMS)
+        self.algorithm.setCurrentText(
+            resolve_startup_algorithm(
+                self.startup_algorithm,
+                self.last_algorithm,
+                self.gpu_preference,
+            )
+        )
         self.algorithm.setToolTip(
             "Fast QEM works on every supported system. Depth Adaptive QEM uses its bundled "
             "NVIDIA CUDA runtime to measure the surface before reduction and can preserve more "
-            "shape detail. It is available when MeshMill detects compatible NVIDIA hardware."
+            "shape detail. Depth + Density Adaptive QEM adds density- and normal-weighted "
+            "reduction plus bounded surface finishing for the highest measured quality, with "
+            "a longer runtime. GPU-guided algorithms are available when MeshMill detects "
+            "compatible NVIDIA hardware."
         )
-        if not gpu_backend_supported():
-            depth_index = self.algorithm.findText(DEPTH_ADAPTIVE_LABEL)
-            if depth_index >= 0:
-                self.algorithm.setItemData(
-                    depth_index,
-                    QColor("#9CA3AF"),
-                    Qt.ItemDataRole.ForegroundRole,
-                )
+        if not gpu_backend_supported(self.gpu_preference):
+            for gpu_algorithm in (DEPTH_ADAPTIVE_LABEL, DEPTH_DENSITY_ADAPTIVE_LABEL):
+                gpu_index = self.algorithm.findText(gpu_algorithm)
+                if gpu_index >= 0:
+                    self.algorithm.setItemData(
+                        gpu_index,
+                        QColor("#9CA3AF"),
+                        Qt.ItemDataRole.ForegroundRole,
+                    )
         self.algorithm.currentTextChanged.connect(self._algorithm_changed)
         algorithm_row.addWidget(self.algorithm, 1)
         optimization_panel.addLayout(algorithm_row)
@@ -2580,6 +3564,39 @@ class MainWindow(QMainWindow):
         self._units_changed(self.default_units)
         units_row.addWidget(self.units, 1)
         optimization_panel.addLayout(units_row)
+
+        processing_row = QHBoxLayout()
+        processing_row.addWidget(
+            field_label(
+                "Processing",
+                "Auto chooses the faster supported route. Full mesh keeps all geometry together. "
+                "Tiled processing divides a mesh into bounded pieces for parallel CPU work.",
+            )
+        )
+        self.processing_route = ArrowComboBox()
+        self.processing_route.addItem("Auto", "auto")
+        self.processing_route.addItem("Full mesh", "full")
+        self.processing_route.addItem("Tiled", "tiled")
+        route_index = self.processing_route.findData(self.large_mesh_mode)
+        self.processing_route.setCurrentIndex(max(0, route_index))
+        self.processing_route.setToolTip(
+            "Auto checks the selected algorithm, mesh size, available memory, cached tile index, "
+            "worker capacity, and matched route measurements. It uses tiles only when their setup "
+            "and processing estimate is better than full mesh processing. Full mesh and Tiled override Auto."
+        )
+        self.processing_route.currentIndexChanged.connect(self._processing_route_changed)
+        processing_row.addWidget(self.processing_route, 1)
+        optimization_panel.addLayout(processing_row)
+
+        self.processing_plan = QLabel("Processing: open a mesh to estimate time and quality")
+        self.processing_plan.setWordWrap(True)
+        self.processing_plan.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.processing_plan.setProperty("muted", True)
+        self.processing_plan.setToolTip(
+            "Estimates are based on matched reference runs. Average error measures overall "
+            "surface change. Peak error describes the higher-error end of the sampled surface."
+        )
+        optimization_panel.addWidget(self.processing_plan)
         general_panel.addWidget(self.open_button)
         general_panel.addWidget(self.reload_button)
 
@@ -2611,40 +3628,53 @@ class MainWindow(QMainWindow):
 
         self.status = QLabel("Open STL")
         self.status.setWordWrap(True)
-        self.status.setStyleSheet("color: #5E6B80;")
-        optimization_panel.addWidget(self.status)
+        self.status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.status.setProperty("muted", True)
 
         optimization_panel.addWidget(self.preview_button)
         optimization_panel.addWidget(self.comparison_actions)
 
         self.save_button = QPushButton("Save current mesh…")
         self.save_button.setProperty("accent", True)
+        self.save_button.setProperty("fileAction", True)
         self.save_button.setEnabled(self.mesh_modified)
         self.save_button.clicked.connect(self.save_file)
+        self._set_theme_icon(self.save_button, "open")
+        self.generate_script_button = QPushButton("Generate PowerShell script…")
+        self.generate_script_button.setProperty("quiet", True)
+        self.generate_script_button.setEnabled(False)
+        self.generate_script_button.setToolTip(
+            "Create a non-interactive PowerShell script that repeats committed full-mesh "
+            "optimization passes with their applied algorithm, Draft/Balanced/Fine quality, and GPU settings."
+        )
+        self.generate_script_button.clicked.connect(self._generate_optimization_script)
+        self._set_theme_icon(self.generate_script_button, "copy")
+        general_panel.addWidget(self.generate_script_button)
         general_panel.addWidget(self.save_button)
         self._update_action_row_visibility()
         info_row = QHBoxLayout()
         self.settings_button = QPushButton("Settings")
         self.settings_button.setProperty("quiet", True)
         self.settings_button.clicked.connect(self._show_settings)
+        self._set_theme_icon(self.settings_button, "settings")
         info_row.addWidget(self.settings_button)
         self.about_button = QPushButton("About")
         self.about_button.setProperty("quiet", True)
         self.about_button.clicked.connect(self._show_about)
+        self._set_theme_icon(self.about_button, "info")
         info_row.addWidget(self.about_button)
         self.repository_button = QPushButton("GitHub")
         self.repository_button.setProperty("quiet", True)
         self.repository_button.setEnabled(bool(REPOSITORY_URL))
         self.repository_button.clicked.connect(self._open_repository)
+        self._set_theme_icon(self.repository_button, "github")
         info_row.addWidget(self.repository_button)
         general_panel.addLayout(info_row)
         self.version_label = VersionButton(f"MeshMill {APP_VERSION}")
+        self.version_label.setObjectName("versionLabel")
         self.version_label.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.version_label.setStyleSheet(
-            "QPushButton { color: #8A94A6; font-size: 9px; border: 0; "
-            "background: transparent; padding: 2px; } "
-            "QPushButton:hover { color: #2563FF; text-decoration: underline; }"
-        )
+        self.version_label.setProperty("muted", True)
+        self.version_label.setStyleSheet("")
         self.version_label.setToolTip(
             "Click to check GitHub for a newer MeshMill release. Right-click to copy the installed "
             "version. This does not enable automatic checks."
@@ -2674,6 +3704,7 @@ class MainWindow(QMainWindow):
             self._measurement_interaction,
         )
         self.measure_picker = vtkHardwarePicker()
+        self.keyboard_picker = vtkHardwarePicker()
         self.navigation_style.invert_horizontal = self.mouse_horizontal
         self.navigation_style.invert_vertical = self.mouse_vertical
         self.navigation_style.invert_zoom = self.mouse_zoom
@@ -2681,14 +3712,17 @@ class MainWindow(QMainWindow):
         self._create_view_pad()
         self._create_density_legend()
         self.vtk_widget.installEventFilter(self)
-        QTimer.singleShot(0, self._position_view_pad)
+        QTimer.singleShot(0, self._position_viewport_overlays)
         self.metrics_timer = QTimer(self)
-        self.metrics_timer.setInterval(1000)
+        # System metrics are sampled independently of geometry-progress updates so the
+        # operation panel remains live while a worker is between progress callbacks.
+        self.metrics_timer.setInterval(self.metrics_refresh_ms)
         self.metrics_timer.timeout.connect(self._update_system_metrics)
         self.metrics_timer.start()
         self.loading_timer = QTimer(self)
         self.loading_timer.setInterval(250)
         self.loading_timer.timeout.connect(self._update_loading_panel)
+        self._apply_appearance()
         self._update_system_metrics()
         self._install_help_tooltips()
         localize_widget_tree(self)
@@ -2817,6 +3851,7 @@ class MainWindow(QMainWindow):
         for name in (
             "reload_button",
             "save_button",
+            "generate_script_button",
             "preview_button",
             "open_file_folder_button",
             "copy_file_path_button",
@@ -2830,7 +3865,27 @@ class MainWindow(QMainWindow):
         available = bool(self.mesh_modified and self.source_poly is not None)
         self.save_button.setEnabled(available)
         self.reload_button.setEnabled(available)
+        self.generate_script_button.setEnabled(available and bool(self.optimization_script_passes))
         self._update_action_row_visibility()
+
+    def _toggle_full_screen(self) -> None:
+        """Toggle immersive full screen while preserving a maximized return state."""
+        if self.isFullScreen():
+            self.showMaximized()
+        else:
+            self.showFullScreen()
+        QTimer.singleShot(0, self._sync_full_screen_button)
+        QTimer.singleShot(0, self._schedule_viewport_layout_refresh)
+        QTimer.singleShot(100, self._schedule_viewport_layout_refresh)
+
+    def _sync_full_screen_button(self) -> None:
+        button = getattr(self, "fullscreen_button", None)
+        if button is not None:
+            button.setToolTip(
+                "Exit full screen (Ctrl+Enter)"
+                if self.isFullScreen()
+                else "Full screen (Ctrl+Enter)"
+            )
 
     def _shortcut_callback(self, action: str):
         callbacks = {
@@ -2855,6 +3910,7 @@ class MainWindow(QMainWindow):
             "display_wireframe": lambda: self._set_display_shortcut("Wireframe"),
             "display_vertices": lambda: self._set_display_shortcut("Vertices"),
             "display_density": lambda: self._set_display_shortcut("Density"),
+            "toggle_fullscreen": lambda: MainWindow._toggle_full_screen(self),
             "view_left": lambda: self._set_standard_view("left"),
             "view_front": lambda: self._set_standard_view("front"),
             "view_right": lambda: self._set_standard_view("right"),
@@ -2927,6 +3983,236 @@ class MainWindow(QMainWindow):
         else:
             self.outer_layout.addWidget(self.viewport_column, 1)
             self.outer_layout.addWidget(self.controls_widget)
+        metric_row = getattr(self, "metrics_toggle_row", None)
+        if metric_row is not None:
+            metric_row.setDirection(
+                QBoxLayout.Direction.LeftToRight
+                if self.tools_side == "Right"
+                else QBoxLayout.Direction.RightToLeft
+            )
+
+    def _apply_appearance(self) -> None:
+        """Apply the selected visual palette without changing controls or behavior."""
+        app = QApplication.instance()
+        if app is None:
+            return
+        theme = appearance_theme(self.appearance_theme_name)
+        viewport_theme = self._viewport_theme()
+        app.setStyleSheet(app_stylesheet(self.appearance_theme_name, self._font_pixel_size()))
+        palette = app.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(theme["window"]))
+        palette.setColor(QPalette.ColorRole.Base, QColor(theme["field"]))
+        palette.setColor(QPalette.ColorRole.Button, QColor(theme["field"]))
+        palette.setColor(QPalette.ColorRole.Text, QColor(theme["text"]))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor(theme["text"]))
+        palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(theme["panel"]))
+        palette.setColor(QPalette.ColorRole.ToolTipText, QColor(theme["text"]))
+        app.setPalette(palette)
+        QToolTip.setPalette(palette)
+        self._refresh_brand_logo()
+        for target, icon_name in getattr(self, "_theme_icon_targets", []):
+            if target is not None:
+                self._apply_theme_icon(target, icon_name)
+        self._refresh_theme_overlays(theme, viewport_theme)
+        density_base = self._density_palette_key(viewport_theme)
+        if (
+            hasattr(self, "density_cache")
+            and getattr(self, "_density_palette_base", None) != density_base
+        ):
+            self._density_palette_base = density_base
+            # A theme switch can arrive while an old-palette density job is still running.
+            # Invalidate its token before requesting the palette for the newly selected viewport.
+            self.density_generation += 1
+            if self.active_operation == "Analyzing point density":
+                if self.operation_cancel_event is not None:
+                    self.operation_cancel_event.set()
+                self._end_mesh_operation()
+            self.density_cache.clear()
+            if hasattr(self, "display_type") and self._display_mode() == "Density":
+                QTimer.singleShot(
+                    0,
+                    lambda: self._show_poly(
+                        self._active_density_mesh()[0], reset_camera=False
+                    )
+                    if self._active_density_mesh()[0] is not None
+                    else None,
+                )
+        renderer = getattr(self, "renderer", None)
+        if renderer is not None:
+            viewport_color = QColor(viewport_theme["viewport"])
+            renderer.SetBackground(
+                viewport_color.redF(), viewport_color.greenF(), viewport_color.blueF()
+            )
+            render_window = self.vtk_widget.GetRenderWindow()
+            if render_window is not None:
+                render_window.Render()
+        self._update_toolbox_width()
+        self._apply_native_title_bar(theme)
+        if hasattr(self, "tooltip_filter"):
+            self.tooltip_filter.apply_appearance(self.appearance_theme_name)
+        QTimer.singleShot(0, self._position_viewport_overlays)
+
+    def _custom_density_colors(
+        self,
+    ) -> tuple[tuple[int, int, int], tuple[int, int, int]] | None:
+        if self.viewport_appearance_name != "custom":
+            return None
+        left = QColor(self.custom_density_gradient_left)
+        right = QColor(self.custom_density_gradient_right)
+        if not left.isValid() or not right.isValid():
+            return None
+        return (
+            (left.red(), left.green(), left.blue()),
+            (right.red(), right.green(), right.blue()),
+        )
+
+    def _density_palette_key(self, viewport_theme: dict[str, str]) -> tuple[object, ...]:
+        return (viewport_theme["viewport"], self._custom_density_colors())
+
+    def _viewport_theme(self) -> dict[str, str]:
+        """Return the palette used by the render area and all of its floating aids."""
+        name = self.appearance_theme_name
+        if self.viewport_appearance_name not in {"match", "custom"}:
+            name = self.viewport_appearance_name
+        return appearance_theme(name)
+
+    def _font_pixel_size(self) -> int:
+        return (11, 12, 13, 14, 15)[self.font_size_position]
+
+    def _update_toolbox_width(self) -> None:
+        controls = getattr(self, "controls_widget", None)
+        if controls is None:
+            return
+        # Wider text needs room before the toolbox starts wrapping labels or clipping controls.
+        width = 352 + (self._font_pixel_size() - 12) * 28
+        controls.setFixedWidth(max(324, min(448, width)))
+        content = getattr(self, "controls_content", None)
+        if content is not None:
+            content.updateGeometry()
+
+    def _set_theme_icon(self, target: QWidget, icon_name: str) -> None:
+        """Register a control or label for palette-aware icon refreshes."""
+        if not hasattr(self, "_theme_icon_targets"):
+            self._theme_icon_targets: list[tuple[QWidget, str]] = []
+        self._theme_icon_targets.append((target, icon_name))
+        self._apply_theme_icon(target, icon_name)
+
+    def _apply_theme_icon(self, target: QWidget, icon_name: str) -> None:
+        theme = appearance_theme(self.appearance_theme_name)
+        tone = str(target.property("iconTone") or "accent")
+        color = theme.get(tone, theme["accent"])
+        icon = draw_ui_icon(icon_name, color)
+        if isinstance(target, QLabel):
+            target.setPixmap(icon.pixmap(18, 18))
+        elif isinstance(target, QPushButton):
+            target.setIcon(icon)
+            target.setIconSize(QSize(17, 17))
+
+    def _refresh_brand_logo(self) -> None:
+        logo = getattr(self, "brand_logo", None)
+        logo_path = resource_path("assets/meshmill-logo.svg")
+        if logo is None or not logo_path.exists():
+            return
+        theme = appearance_theme(getattr(self, "appearance_theme_name", DEFAULT_APPEARANCE))
+        try:
+            svg = logo_path.read_text(encoding="utf-8")
+            svg = svg.replace("#0B1B34", theme["text"]).replace("#6B7280", theme["muted"])
+            pixmap = QPixmap()
+            pixmap.loadFromData(svg.encode("utf-8"), "SVG")
+            logo.setPixmap(pixmap.scaled(310, 78, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        except OSError:
+            return
+
+    def _refresh_theme_overlays(
+        self, theme: dict[str, str], viewport_theme: dict[str, str]
+    ) -> None:
+        """Restyle floating viewport aids that own a local stylesheet."""
+        floating = (
+            "QFrame {{ color: {text}; background: {overlay}; border: 1px solid {border}; "
+            "border-radius: 8px; }} QLabel {{ color: {text}; background: transparent; border: 0; }} "
+            "QComboBox, QPushButton {{ color: {text}; background: {field}; border: 1px solid {border}; "
+            "border-radius: 6px; }} QPushButton:hover, QComboBox:hover {{ background: {soft}; "
+            "border-color: {accent}; }}"
+        ).format(
+            text=theme["text"], overlay=theme["overlay"], border=theme["border"],
+            field=theme["field"], soft=theme["accent_soft"], accent=theme["accent"],
+        )
+        for name in ("measure_info_frame", "crop_info_frame"):
+            frame = getattr(self, name, None)
+            if frame is not None:
+                frame.setStyleSheet(floating)
+        legend = getattr(self, "density_legend", None)
+        if legend is not None:
+            legend.set_theme(theme, viewport_theme)
+            legend.set_gradient_colors(self._custom_density_colors())
+            legend.setText(
+                f"POINT DENSITY   <span style='color:{theme['muted']}'>Sparse</span>  "
+                "<span style='color:#199AD6'>●</span> <span style='color:#57E0B8'>●</span> "
+                "<span style='color:#FACC15'>●</span> <span style='color:#E23730'>● Dense</span>"
+            )
+            legend.setStyleSheet(
+                f"background: {theme['overlay']}; color: {theme['text']}; "
+                f"border: 1px solid {theme['border']}; border-radius: 7px; padding: 7px;"
+            )
+            legend.setStyleSheet(f"background: {viewport_theme['viewport']};")
+            self._apply_rounded_mask(legend, 9)
+        indicator = getattr(self, "orientation_indicator", None)
+        if indicator is not None:
+            indicator.set_theme(theme, viewport_theme)
+            indicator.setStyleSheet(f"background: {viewport_theme['viewport']};")
+            self._apply_rounded_mask(indicator, 9)
+        scale_bar = getattr(self, "scale_bar", None)
+        if scale_bar is not None:
+            scale_bar.set_theme(theme, viewport_theme)
+            self._apply_rounded_mask(scale_bar, 8)
+        view_pad = getattr(self, "view_pad", None)
+        if view_pad is not None:
+            view_pad.setStyleSheet(
+                f"QFrame#viewPad {{ background: {theme['panel']}; border: 1px solid {theme['border']}; border-radius: 10px; }} "
+                f"QFrame#viewPad QPushButton {{ background: {theme['surface']}; color: {theme['text']}; border: 1px solid {theme['border']}; border-radius: 6px; }} "
+                f"QFrame#viewPad QPushButton:checked {{ background: {theme['accent']}; color: white; border-color: {theme['accent_hover']}; }}"
+            )
+            self._apply_rounded_mask(view_pad, 10)
+        loading = getattr(self, "loading_frame", None)
+        if loading is not None:
+            loading.setStyleSheet(
+                f"QFrame#loadingPanel {{ background: {theme['panel']}; border: 1px solid {theme['border']}; border-radius: 14px; }} "
+                f"QFrame#loadingPanel QLabel {{ color: {theme['text']}; background: transparent; border: 0; }} "
+                f"QFrame#loadingPanel QLabel[loadingMetric='true'] {{ background: transparent; border: 1px solid {theme['border']}; border-radius: 5px; padding: 4px 3px; }} "
+                f"QFrame#loadingPanel QProgressBar {{ background: {theme['field']}; color: {theme['text']}; border: 1px solid {theme['border']}; }} "
+                f"QFrame#loadingPanel QProgressBar::chunk {{ background: {theme['accent']}; }}"
+            )
+        loupe = getattr(self, "loupe_frame", None)
+        if loupe is not None:
+            loupe.setStyleSheet(
+                f"QFrame {{ border: 3px solid {theme['accent']}; border-radius: 180px; background: #080b10; }}"
+            )
+
+    def _apply_native_title_bar(self, theme: dict[str, str]) -> None:
+        """Keep the Windows caption aligned with the selected application appearance."""
+        if os.name != "nt":
+            return
+        try:
+            dark = int(self.appearance_theme_name == "Dark Focus")
+            value = ctypes.c_int(dark)
+            hwnd = ctypes.c_void_p(int(self.winId()))
+            dwmapi = ctypes.WinDLL("dwmapi")
+            # 20 is supported by current Windows 10 and Windows 11. Older versions simply
+            # ignore it, leaving the normal native caption intact.
+            dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
+            def colorref(hex_color: str) -> ctypes.c_uint:
+                color = QColor(hex_color)
+                return ctypes.c_uint(color.red() | (color.green() << 8) | (color.blue() << 16))
+
+            caption = colorref(theme["window"])
+            text = colorref(theme["text"])
+            border = colorref(theme["border"])
+            for attribute, native_color in ((35, caption), (36, text), (34, border)):
+                dwmapi.DwmSetWindowAttribute(
+                    hwnd, attribute, ctypes.byref(native_color), ctypes.sizeof(native_color)
+                )
+        except (AttributeError, OSError, TypeError):
+            pass
 
     def _show_settings(self) -> None:
         dialog = QDialog(self)
@@ -2944,10 +4230,6 @@ class MainWindow(QMainWindow):
         def section(title: str) -> QVBoxLayout:
             frame = QFrame(content)
             frame.setObjectName("settingsSection")
-            frame.setStyleSheet(
-                "QFrame#settingsSection { border: 1px solid #D6DCE5; border-radius: 8px; "
-                "background: #FFFFFF; }"
-            )
             section_layout = QVBoxLayout(frame)
             section_layout.setContentsMargins(14, 12, 14, 12)
             heading = QLabel(title, frame)
@@ -3000,6 +4282,105 @@ class MainWindow(QMainWindow):
         language.setToolTip("Application language.")
         form.addRow("Language", language)
 
+        appearance = ArrowComboBox(dialog)
+        for appearance_name in APPEARANCE_THEMES:
+            appearance.addItem(appearance_name, appearance_name)
+        appearance.setCurrentIndex(
+            max(0, appearance.findData(self.appearance_theme_name))
+        )
+        appearance.setToolTip(
+            "Changes MeshMill window colors, panel contrast, and controls. It does not change "
+            "tools, layout, or mesh behavior."
+        )
+        form.addRow("Appearance", appearance)
+
+        viewport_appearance = ArrowComboBox(dialog)
+        viewport_appearance.addItem("Match window", "match")
+        for appearance_name in APPEARANCE_THEMES:
+            viewport_appearance.addItem(appearance_name, appearance_name)
+        viewport_appearance.addItem("Custom", "custom")
+        viewport_appearance.setCurrentIndex(
+            max(0, viewport_appearance.findData(self.viewport_appearance_name))
+        )
+        viewport_appearance.setToolTip(
+            "Sets the viewport background and its floating controls. Match window uses the "
+            "same palette as the rest of MeshMill."
+        )
+        form.addRow("Viewport appearance", viewport_appearance)
+
+        gradient_colors = QWidget(dialog)
+        gradient_row = QHBoxLayout(gradient_colors)
+        gradient_row.setContentsMargins(0, 0, 0, 0)
+        gradient_row.setSpacing(6)
+        custom_gradient = {
+            "left": self.custom_density_gradient_left,
+            "right": self.custom_density_gradient_right,
+        }
+        left_gradient_button = QPushButton(gradient_colors)
+        right_gradient_button = QPushButton(gradient_colors)
+
+        def refresh_gradient_buttons() -> None:
+            for side, button, label in (
+                ("left", left_gradient_button, "Sparse"),
+                ("right", right_gradient_button, "Dense"),
+            ):
+                color = QColor(custom_gradient[side])
+                luminance = (color.red() * 299 + color.green() * 587 + color.blue() * 114) / 1000
+                text = "#102A43" if luminance > 156 else "#FFFFFF"
+                button.setText(f"{label}: {color.name().upper()}")
+                button.setStyleSheet(
+                    f"background: {color.name()}; color: {text}; border-color: {color.name()};"
+                )
+
+        def choose_gradient_color(side: str) -> None:
+            color = QColorDialog.getColor(
+                QColor(custom_gradient[side]), dialog, f"{side.title()} density color"
+            )
+            if color.isValid():
+                custom_gradient[side] = color.name().upper()
+                refresh_gradient_buttons()
+
+        left_gradient_button.clicked.connect(lambda: choose_gradient_color("left"))
+        right_gradient_button.clicked.connect(lambda: choose_gradient_color("right"))
+        gradient_row.addWidget(left_gradient_button)
+        gradient_row.addWidget(right_gradient_button)
+        form.addRow("Density gradient", gradient_colors)
+
+        def sync_custom_gradient_visibility() -> None:
+            gradient_colors.setVisible(viewport_appearance.currentData() == "custom")
+
+        viewport_appearance.currentIndexChanged.connect(sync_custom_gradient_visibility)
+        refresh_gradient_buttons()
+        sync_custom_gradient_visibility()
+
+        font_size_control = QWidget(dialog)
+        font_size_row = QHBoxLayout(font_size_control)
+        font_size_row.setContentsMargins(0, 0, 0, 0)
+        font_size_row.setSpacing(8)
+        font_size = QSlider(Qt.Orientation.Horizontal, font_size_control)
+        font_size.setRange(0, 4)
+        font_size.setSingleStep(1)
+        font_size.setPageStep(1)
+        font_size.setTickInterval(1)
+        font_size.setTickPosition(QSlider.TickPosition.TicksBelow)
+        font_size.setValue(self.font_size_position)
+        font_size.setToolTip(
+            "Five fixed interface sizes. System default is the second position. "
+            "The toolbox widens with larger text so controls and descriptions stay readable."
+        )
+        font_size_name = QLabel(font_size_control)
+        font_size_name.setMinimumWidth(102)
+        font_size_names = ("Smaller", "System default", "Larger", "Large", "Largest")
+
+        def update_font_size_name(value: int) -> None:
+            font_size_name.setText(font_size_names[max(0, min(4, value))])
+
+        font_size.valueChanged.connect(update_font_size_name)
+        update_font_size_name(font_size.value())
+        font_size_row.addWidget(font_size, 1)
+        font_size_row.addWidget(font_size_name)
+        form.addRow("Font size", font_size_control)
+
         tools_side = ArrowComboBox(dialog)
         tools_side.addItems(["Right", "Left"])
         tools_side.setCurrentText(self.tools_side)
@@ -3013,6 +4394,219 @@ class MainWindow(QMainWindow):
         form.addRow("Default units", default_units)
 
         interface_layout.addLayout(form)
+
+        overlays_layout = section("Viewport overlays")
+        overlays_form = QFormLayout()
+        overlay_controls: dict[str, tuple[QCheckBox, ArrowComboBox]] = {}
+        overlay_refreshing = {"active": False}
+
+        def refresh_overlay_corners() -> None:
+            if overlay_refreshing["active"]:
+                return
+            overlay_refreshing["active"] = True
+            try:
+                selected = {
+                    key: str(combo.currentData() or VIEWPORT_OVERLAYS[key][1])
+                    for key, (_show, combo) in overlay_controls.items()
+                }
+                for key, (show, combo) in overlay_controls.items():
+                    occupied = {
+                        selected[other_key]
+                        for other_key, (other_show, _other_combo) in overlay_controls.items()
+                        if other_key != key and other_show.isChecked()
+                    }
+                    allowed = (
+                        [corner for corner in VIEWPORT_CORNERS if corner not in occupied]
+                        if show.isChecked()
+                        else list(VIEWPORT_CORNERS)
+                    )
+                    choice = selected[key] if selected[key] in allowed else allowed[0]
+                    with QSignalBlocker(combo):
+                        combo.clear()
+                        for corner in allowed:
+                            combo.addItem(corner, corner)
+                        combo.setCurrentIndex(max(0, combo.findData(choice)))
+                    combo.setEnabled(show.isChecked())
+            finally:
+                overlay_refreshing["active"] = False
+
+        for key, (label_text, default_corner) in VIEWPORT_OVERLAYS.items():
+            control = QWidget(dialog)
+            row = QHBoxLayout(control)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(7)
+            show = QCheckBox("Show", control)
+            show.setChecked(self.viewport_overlay_visible.get(key, True))
+            combo = ArrowComboBox(control)
+            combo.addItem(self.viewport_overlay_corners.get(key, default_corner))
+            tooltip = (
+                f"Show or hide the {label_text.lower()} overlay. Visible overlays use distinct "
+                "viewport corners."
+            )
+            show.setToolTip(tooltip)
+            combo.setToolTip("Choose a free viewport corner for this overlay.")
+            row.addWidget(show)
+            row.addWidget(combo, 1)
+            overlays_form.addRow(label_text, control)
+            overlay_controls[key] = (show, combo)
+            show.toggled.connect(refresh_overlay_corners)
+            combo.currentIndexChanged.connect(refresh_overlay_corners)
+        refresh_overlay_corners()
+        overlays_layout.addLayout(overlays_form)
+
+        metrics_layout = section("Metrics history")
+        metrics_form = QFormLayout()
+        metrics_refresh = ArrowComboBox(dialog)
+        for milliseconds, label in (
+            (1000, "Once per second"),
+            (500, "2 times per second"),
+            (250, "4 times per second"),
+            (2000, "Every 2 seconds"),
+            (5000, "Every 5 seconds"),
+        ):
+            metrics_refresh.addItem(label, milliseconds)
+        metrics_refresh.setCurrentIndex(
+            max(0, metrics_refresh.findData(self.metrics_refresh_ms))
+        )
+        metrics_refresh.setToolTip(
+            "How often MeshMill samples CPU, GPU, RAM, VRAM, and I/O. Faster updates make the "
+            "graph smoother but retain more samples."
+        )
+        metrics_form.addRow("Refresh", metrics_refresh)
+
+        metrics_history = ArrowComboBox(dialog)
+        for minutes in (5, 15, 30, 60, 120):
+            metrics_history.addItem(f"{minutes} minutes", minutes)
+        metrics_history.setCurrentIndex(
+            max(0, metrics_history.findData(self.metrics_history_minutes))
+        )
+        metrics_history.setToolTip(
+            "How long the scrollable CPU and GPU graph stays available during this session."
+        )
+        metrics_form.addRow("Keep history", metrics_history)
+        metrics_timeline = ArrowComboBox(dialog)
+        for seconds in (10, 30, 60, 120, 300):
+            metrics_timeline.addItem(f"{seconds} seconds visible", seconds)
+        metrics_timeline.setCurrentIndex(
+            max(0, metrics_timeline.findData(self.metrics_visible_seconds))
+        )
+        metrics_timeline.setToolTip(
+            "The live width of the graph. Older retained samples stay available through the "
+            "horizontal scrollbar."
+        )
+        metrics_form.addRow("Timeline zoom", metrics_timeline)
+        metrics_memory = QLabel(dialog)
+        metrics_memory.setProperty("muted", True)
+
+        def update_metrics_memory_estimate() -> None:
+            refresh = int(metrics_refresh.currentData() or 500)
+            minutes = int(metrics_history.currentData() or 15)
+            samples = math.ceil(minutes * 60_000 / refresh)
+            estimated_bytes = samples * 96
+            metrics_memory.setText(
+                f"{samples:,} samples, about {fmt_bytes(estimated_bytes)} RAM"
+            )
+
+        metrics_refresh.currentIndexChanged.connect(update_metrics_memory_estimate)
+        metrics_history.currentIndexChanged.connect(update_metrics_memory_estimate)
+        metrics_timeline.currentIndexChanged.connect(update_metrics_memory_estimate)
+        update_metrics_memory_estimate()
+        metrics_form.addRow("Memory estimate", metrics_memory)
+        metrics_layout.addLayout(metrics_form)
+
+        optimization_defaults_layout = section("Optimization defaults")
+        optimization_defaults_form = QFormLayout()
+
+        startup_algorithm = ArrowComboBox(dialog)
+        startup_algorithm.addItem("Last used", "last")
+        startup_algorithm.addItem("Automatic (best available)", "auto")
+        for algorithm_name in ALGORITHMS:
+            label = algorithm_name
+            if is_gpu_guided_algorithm(algorithm_name) and not gpu_backend_supported(
+                self.gpu_preference
+            ):
+                label += "  (GPU unavailable)"
+            startup_algorithm.addItem(label, algorithm_name)
+        startup_algorithm_index = startup_algorithm.findData(self.startup_algorithm)
+        startup_algorithm.setCurrentIndex(max(0, startup_algorithm_index))
+        startup_algorithm.setToolTip(
+            "Choose the algorithm selected when MeshMill opens. Last used remembers your most "
+            "recent choice. Automatic selects Depth + Density Adaptive QEM when its GPU backend "
+            "is available and Density balanced otherwise."
+        )
+        optimization_defaults_form.addRow("Startup algorithm", startup_algorithm)
+
+        startup_quality = ArrowComboBox(dialog)
+        startup_quality.addItem("Last used", "last")
+        for quality_name in SMART_DIVISORS:
+            startup_quality.addItem(quality_name, quality_name)
+        startup_quality_index = startup_quality.findData(self.startup_quality)
+        startup_quality.setCurrentIndex(max(0, startup_quality_index))
+        startup_quality.setToolTip(
+            "Choose the Smart quality setting selected when MeshMill opens. Draft removes more "
+            "geometry, Balanced is the middle setting, and Fine preserves more detail."
+        )
+        optimization_defaults_form.addRow("Startup quality", startup_quality)
+        optimization_defaults_layout.addLayout(optimization_defaults_form)
+
+        guide_title = QLabel("Algorithm tradeoffs", dialog)
+        guide_title.setStyleSheet("font-weight: 600; margin-top: 5px;")
+        optimization_defaults_layout.addWidget(guide_title)
+        guide = QGridLayout()
+        guide.setHorizontalSpacing(6)
+        guide.setVerticalSpacing(4)
+        guide_headers = (
+            "Method",
+            "Surface detail",
+            "Damaged areas",
+            "Size accuracy",
+            "Surface continuity",
+            "Speed",
+        )
+        for column, heading_text in enumerate(guide_headers):
+            heading = QLabel(heading_text, dialog)
+            heading.setWordWrap(True)
+            heading.setStyleSheet("font-weight: 600;")
+            heading.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            guide.addWidget(heading, 0, column)
+        tradeoffs = (
+            ("Depth + Density", "Best", "Best", "Best", "Best", "Moderate"),
+            ("Depth Adaptive", "Very good", "Very good", "Very good", "Very good", "Moderate"),
+            ("Density balanced", "Good", "Good", "Very good", "Good", "Fast"),
+            ("Fast QEM", "Good", "Fair", "Fair", "Good", "Fastest"),
+        )
+        tradeoff_colors = {
+            "Best": ("#DCFCE7", "#166534"),
+            "Very good": ("#ECFDF5", "#047857"),
+            "Good": ("#FEF3C7", "#92400E"),
+            "Fair": ("#FEE2E2", "#991B1B"),
+            "Moderate": ("#FEF3C7", "#92400E"),
+            "Fast": ("#ECFDF5", "#047857"),
+            "Fastest": ("#DCFCE7", "#166534"),
+        }
+        for row, values in enumerate(tradeoffs, start=1):
+            method = QLabel(values[0], dialog)
+            method.setWordWrap(True)
+            method.setStyleSheet("font-weight: 600;")
+            guide.addWidget(method, row, 0)
+            for column, value in enumerate(values[1:], start=1):
+                background, foreground = tradeoff_colors[value]
+                cell = QLabel(value, dialog)
+                cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                cell.setStyleSheet(
+                    f"color: {foreground}; background: {background}; "
+                    "border-radius: 4px; padding: 3px;"
+                )
+                guide.addWidget(cell, row, column)
+        guide_note = QLabel(
+            "These labels summarize the retained comparison mesh. Results vary with geometry. "
+            "GPU-guided methods spend more time measuring the surface before reduction.",
+            dialog,
+        )
+        guide_note.setWordWrap(True)
+        guide_note.setProperty("muted", True)
+        optimization_defaults_layout.addLayout(guide)
+        optimization_defaults_layout.addWidget(guide_note)
 
         performance_layout = section("Performance")
         performance_form = QFormLayout()
@@ -3029,7 +4623,7 @@ class MainWindow(QMainWindow):
             performance_form.addRow(label, control)
 
         gpu_preference = ArrowComboBox(dialog)
-        gpu_preference.addItem("System default", "system")
+        gpu_preference.addItem("Automatic (most available VRAM)", "system")
         for device in self.cuda_device_list:
             memory = fmt_bytes(int(device["total_memory"]))
             gpu_preference.addItem(
@@ -3041,9 +4635,10 @@ class MainWindow(QMainWindow):
         performance_row(
             "GPU",
             gpu_preference,
-            "Selects the CUDA GPU used by Depth Adaptive QEM. System default uses CUDA's default "
-            "adapter. The viewport uses the graphics adapter selected by the operating system. "
-            "The selected GPU is used the next time an optimization starts.",
+            "Selects the CUDA GPU used by GPU-guided optimization. Automatic checks available "
+            "VRAM when work starts and chooses the least occupied compatible GPU. A specific "
+            "selection is remembered and used until you change it. The viewport GPU is managed "
+            "separately by the operating system.",
         )
 
         geometry_processes = ArrowComboBox(dialog)
@@ -3065,17 +4660,96 @@ class MainWindow(QMainWindow):
         )
 
         large_mesh_mode = ArrowComboBox(dialog)
-        large_mesh_mode.addItem("Auto", "auto")
-        large_mesh_mode.addItem("Full mesh", "full")
+        large_mesh_mode.addItem("Auto (resource-aware)", "auto")
+        large_mesh_mode.addItem("Full mesh (override)", "full")
+        large_mesh_mode.addItem("Tiled processing", "tiled")
         large_mesh_mode.addItem("Overview only", "overview")
         large_mesh_mode.setCurrentIndex(max(0, large_mesh_mode.findData(self.large_mesh_mode)))
         performance_row(
             "Loading",
             large_mesh_mode,
-            "Automatic loads the complete mesh when it fits safely and uses a lighter overview "
-            "when it does not. Full mesh attempts to load everything. Overview only opens a "
+            "Automatic checks the current memory budget at load time. Full mesh overrides that "
+            "check and can exhaust memory. Tiled processing keeps full-resolution geometry in "
+            "bounded disk-backed tiles and can use multiple CPU workers. Overview only opens a "
             "lighter navigation copy and leaves editing disabled.",
         )
+        auto_tiling = QCheckBox("Use tiled processing automatically", dialog)
+        auto_tiling.setChecked(self.auto_tiling_enabled)
+        performance_row(
+            "Automatic tiling",
+            auto_tiling,
+            "When enabled, Automatic can select tiled processing after comparing index setup and "
+            "reduction estimates with full-mesh processing for the selected algorithm. Disable it "
+            "to keep Automatic on full mesh when memory permits. Oversized meshes still open as an overview.",
+        )
+
+        tiled_recommendation = QLabel(dialog)
+        tiled_recommendation.setWordWrap(True)
+        tiled_recommendation.setToolTip(
+            "Automatic uses tiled processing only when index setup plus tiled reduction is estimated "
+            "to be faster than full-mesh reduction for the selected algorithm."
+        )
+
+        def update_tiled_recommendation(memory_percent: int) -> None:
+            triangle_count = (
+                self.overview_total_triangles
+                if self.overview_total_triangles
+                else len(self.source_faces)
+                if self.source_faces is not None
+                else 0
+            )
+            if not triangle_count:
+                tiled_recommendation.setText(
+                    "Tiled recommendation: evaluated when a mesh is opened. "
+                    "Choose Tiled processing to require bounded full-resolution processing."
+                )
+                return
+            budget = available_physical_memory() * memory_percent / 100.0
+            estimated = triangle_count * ESTIMATED_BYTES_PER_TRIANGLE
+            index_ready = False
+            if self.source_path is not None:
+                try:
+                    index_ready = index_matches(
+                        self.source_path,
+                        load_manifest(default_index_directory(self.source_path)),
+                    )
+                except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                    pass
+            break_even = tiled_runtime_break_even(
+                triangle_count,
+                self.algorithm.currentText(),
+                index_ready,
+            )
+            if self.tiled_mode:
+                tiled_recommendation.setText(
+                    "Tiled recommendation: active for this mesh. Full-resolution tiles are "
+                    "bounded by the selected memory budget."
+                )
+            elif estimated > budget:
+                tiled_recommendation.setText(
+                    "Tiled recommendation: use Tiled processing. Estimated full working memory "
+                    f"({fmt_bytes(estimated)}) exceeds the current budget ({fmt_bytes(budget)})."
+                )
+            elif is_gpu_guided_algorithm(self.algorithm.currentText()):
+                tiled_recommendation.setText(
+                    "Tiled GPU-guided reference: RMS 0.120% full / 0.133% tiled, "
+                    "P95 0.245% / 0.264%. Full mesh selected."
+                )
+            elif break_even is not None and break_even[1] < break_even[0]:
+                tiled_recommendation.setText(
+                    "Tiled recommendation: use Tiled processing. Estimated reduction: "
+                    f"{break_even[0]:.1f} s full, {break_even[1]:.1f} s tiled."
+                )
+            elif break_even is not None:
+                tiled_recommendation.setText(
+                    "Tiled recommendation: full mesh. Estimated reduction: "
+                    f"{break_even[0]:.1f} s full, {break_even[1]:.1f} s tiled."
+                )
+            else:
+                tiled_recommendation.setText(
+                    "Tiled recommendation: optional. This algorithm does not yet have a matched "
+                    "full-mesh and tiled runtime model."
+                )
 
         memory_percent_control = QWidget(dialog)
         memory_percent_layout = QVBoxLayout(memory_percent_control)
@@ -3092,7 +4766,7 @@ class MainWindow(QMainWindow):
         memory_minimum = QLabel("20%", memory_percent_control)
         memory_value = QLabel(memory_percent_control)
         memory_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        memory_value.setStyleSheet("font-weight: 600; color: #2563FF;")
+        memory_value.setStyleSheet("font-weight: 600;")
         memory_maximum = QLabel("80%", memory_percent_control)
         memory_scale.addWidget(memory_minimum)
         memory_scale.addStretch(1)
@@ -3107,8 +4781,12 @@ class MainWindow(QMainWindow):
                     memory_percent.setValue(value)
             budget = round(available_physical_memory() * value / 100.0)
             memory_value.setText(f"{value}%  ({fmt_bytes(budget)})")
+            update_tiled_recommendation(value)
 
         memory_percent.valueChanged.connect(update_memory_budget)
+        self.algorithm.currentTextChanged.connect(
+            lambda _text: update_tiled_recommendation(memory_percent.value())
+        )
         update_memory_budget(memory_percent.value())
         memory_percent_layout.addWidget(memory_percent)
         memory_percent_layout.addLayout(memory_scale)
@@ -3121,6 +4799,7 @@ class MainWindow(QMainWindow):
         )
 
         performance_layout.addLayout(performance_form)
+        performance_layout.addWidget(tiled_recommendation)
 
         invert_layout = section("Invert")
         invert_grid = QGridLayout()
@@ -3199,15 +4878,15 @@ class MainWindow(QMainWindow):
             icon.setToolTip(tooltip)
             diagram = QLabel(cell)
             diagram.setMinimumWidth(145)
-            diagram.setStyleSheet("color: #334155; font-size: 11px;")
+            diagram.setStyleSheet("color: #334155;")
             diagram.setToolTip(tooltip)
 
             def refresh(value: bool) -> None:
                 diagram.setText(inversion_diagram(input_kind, axis, value))
                 diagram.setStyleSheet(
-                    "color: #2563FF; font-size: 11px; font-weight: 600;"
+                    "color: #2563FF; font-weight: 600;"
                     if value
-                    else "color: #334155; font-size: 11px;"
+                    else "color: #334155;"
                 )
 
             refresh(checked)
@@ -3285,11 +4964,32 @@ class MainWindow(QMainWindow):
             reset_all_requested["value"] = True
             automatic_updates.setChecked(False)
             language.setCurrentIndex(language.findData("system"))
+            appearance.setCurrentIndex(appearance.findData(DEFAULT_APPEARANCE))
+            viewport_appearance.setCurrentIndex(
+                viewport_appearance.findData(DEFAULT_APPEARANCE)
+            )
+            custom_gradient["left"] = "#174A82"
+            custom_gradient["right"] = "#E23730"
+            refresh_gradient_buttons()
+            for key, (_label, default_corner) in VIEWPORT_OVERLAYS.items():
+                show, combo = overlay_controls[key]
+                show.setChecked(True)
+                index = combo.findData(default_corner)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+            refresh_overlay_corners()
+            font_size.setValue(1)
+            metrics_refresh.setCurrentIndex(metrics_refresh.findData(1000))
+            metrics_history.setCurrentIndex(metrics_history.findData(15))
+            metrics_timeline.setCurrentIndex(metrics_timeline.findData(300))
             tools_side.setCurrentText("Right")
             default_units.setCurrentText("cm")
+            startup_algorithm.setCurrentIndex(startup_algorithm.findData("last"))
+            startup_quality.setCurrentIndex(startup_quality.findData("last"))
             gpu_preference.setCurrentIndex(gpu_preference.findData("system"))
             geometry_processes.setCurrentIndex(geometry_processes.findData(0))
             large_mesh_mode.setCurrentIndex(large_mesh_mode.findData("auto"))
+            auto_tiling.setChecked(True)
             memory_percent.setValue(50)
             for mouse_check, keyboard_check in inversion_checks.values():
                 mouse_check.setChecked(False)
@@ -3332,10 +5032,32 @@ class MainWindow(QMainWindow):
         if reset_all_requested["value"]:
             self.settings.clear()
         self.locale_preference = str(language.currentData() or "system")
+        self.appearance_theme_name = str(
+            appearance.currentData() or DEFAULT_APPEARANCE
+        )
+        self.viewport_appearance_name = str(
+            viewport_appearance.currentData() or "match"
+        )
+        self.custom_density_gradient_left = custom_gradient["left"]
+        self.custom_density_gradient_right = custom_gradient["right"]
+        self.viewport_overlay_visible = {
+            key: show.isChecked() for key, (show, _combo) in overlay_controls.items()
+        }
+        self.viewport_overlay_corners = {
+            key: str(combo.currentData() or VIEWPORT_OVERLAYS[key][1])
+            for key, (_show, combo) in overlay_controls.items()
+        }
+        self._normalize_viewport_overlay_corners()
+        self.font_size_position = font_size.value()
+        self.metrics_refresh_ms = int(metrics_refresh.currentData() or 1000)
+        self.metrics_history_minutes = int(metrics_history.currentData() or 15)
+        self.metrics_visible_seconds = int(metrics_timeline.currentData() or 300)
         previous_update_setting = self.update_checks_enabled
         self.update_checks_enabled = automatic_updates.isChecked()
         self.locale_code = locale_manager.select(self._resolved_locale(self.locale_preference))
         self.default_units = default_units.currentText()
+        self.startup_algorithm = str(startup_algorithm.currentData() or "last")
+        self.startup_quality = str(startup_quality.currentData() or "last")
         self.gpu_preference = str(gpu_preference.currentData() or "system")
         selected_cuda = next(
             (
@@ -3349,7 +5071,9 @@ class MainWindow(QMainWindow):
             self.vram_capacity_bytes = int(selected_cuda["total_memory"])
         self.geometry_processes = int(geometry_processes.currentData() or 0)
         self.large_mesh_mode = str(large_mesh_mode.currentData())
+        self.auto_tiling_enabled = auto_tiling.isChecked()
         self.large_mesh_memory_percent = memory_percent.value()
+        self._capacity_available_memory = 0
         self.mouse_horizontal = inversion_checks["Horizontal"][0].isChecked()
         self.keyboard_horizontal = inversion_checks["Horizontal"][1].isChecked()
         self.mouse_vertical = inversion_checks["Vertical"][0].isChecked()
@@ -3360,7 +5084,25 @@ class MainWindow(QMainWindow):
         self.navigation_style.invert_vertical = self.mouse_vertical
         self.navigation_style.invert_zoom = self.mouse_zoom
         self.units.setCurrentText(self.default_units)
+        self._apply_appearance()
+        self._position_viewport_overlays()
+        if hasattr(self, "density_legend"):
+            self.density_legend.setVisible(
+                self._display_mode() == "Density" and self._overlay_is_visible("density")
+            )
+        self.metrics_timer.setInterval(self.metrics_refresh_ms)
+        self.geometry_activity_graph.configure_history(
+            self.metrics_refresh_ms,
+            self.metrics_history_minutes,
+            self.metrics_visible_seconds,
+        )
+        self._configure_metrics_history()
         self._apply_tools_side(tools_side.currentText())
+        with QSignalBlocker(self.processing_route):
+            self.processing_route.setCurrentIndex(
+                max(0, self.processing_route.findData(self.large_mesh_mode))
+            )
+        self._update_processing_plan()
         self.shortcuts = {
             shortcut_id: editor.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
             for shortcut_id, editor in shortcut_edits.items()
@@ -3371,11 +5113,31 @@ class MainWindow(QMainWindow):
         self.settings.setValue("interface/tools_side", self.tools_side)
         self.settings.setValue("updates/automatic", self.update_checks_enabled)
         self.settings.setValue("interface/locale", self.locale_preference)
+        self.settings.setValue("interface/appearance_theme", self.appearance_theme_name)
+        self.settings.setValue("interface/viewport_appearance", self.viewport_appearance_name)
+        self.settings.setValue("interface/viewport_appearance_version", 1)
+        self.settings.setValue("interface/density_gradient_left", self.custom_density_gradient_left)
+        self.settings.setValue("interface/density_gradient_right", self.custom_density_gradient_right)
+        for key in VIEWPORT_OVERLAYS:
+            self.settings.setValue(
+                f"interface/overlay_{key}_visible", self.viewport_overlay_visible[key]
+            )
+            self.settings.setValue(
+                f"interface/overlay_{key}_corner", self.viewport_overlay_corners[key]
+            )
+        self.settings.setValue("interface/font_size_position", self.font_size_position)
+        self.settings.setValue("metrics/refresh_ms", self.metrics_refresh_ms)
+        self.settings.setValue("metrics/history_minutes", self.metrics_history_minutes)
+        self.settings.setValue("metrics/visible_seconds", self.metrics_visible_seconds)
+        self.settings.setValue("metrics/default_version", 2)
         self.settings.setValue("performance/gpu_preference", self.gpu_preference)
         self.settings.remove("rendering/gpu_preference")
         self.settings.setValue("interface/default_units", self.default_units)
         self.settings.setValue("interface/units_default_version", 2)
+        self.settings.setValue("optimization/startup_algorithm", self.startup_algorithm)
+        self.settings.setValue("optimization/startup_quality", self.startup_quality)
         self.settings.setValue("performance/large_mesh_mode", self.large_mesh_mode)
+        self.settings.setValue("performance/auto_tiling_enabled", self.auto_tiling_enabled)
         self.settings.setValue("performance/memory_percent", self.large_mesh_memory_percent)
         self.settings.remove("performance/geometry_compute")
         self.settings.setValue("performance/geometry_processes", self.geometry_processes)
@@ -3445,24 +5207,17 @@ class MainWindow(QMainWindow):
         self.metrics_toggle = QPushButton("Metrics  ▲")
         self.metrics_toggle.setCheckable(True)
         self.metrics_toggle.setChecked(False)
-        self.metrics_toggle.setStyleSheet(
-            "QPushButton { background: #FBFAF8; color: #0B1B34; border: 1px solid #D8DCE5; "
-            "border-radius: 5px; padding: 4px 12px; text-align: left; } "
-            "QPushButton:hover { border-color: #2563FF; background: #F1F5FF; }"
-        )
+        self.metrics_toggle.setProperty("quiet", True)
         self.metrics_toggle.toggled.connect(self._toggle_metrics)
-        parent_layout.addWidget(self.metrics_toggle)
+        self.metrics_toggle_row = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self.metrics_toggle_row.setContentsMargins(0, 0, 0, 0)
+        self.metrics_toggle_row.addStretch(1)
+        self.metrics_toggle_row.addWidget(self.metrics_toggle)
+        parent_layout.addLayout(self.metrics_toggle_row)
 
         frame = QFrame()
         self.metrics_frame = frame
         frame.setObjectName("metricsPanel")
-        frame.setStyleSheet(
-            "QFrame#metricsPanel { background: #FBFAF8; border: 1px solid #D8DCE5; "
-            "border-radius: 7px; } QLabel { color: #0B1B34; } "
-            "QProgressBar { border: 1px solid #D8DCE5; border-radius: 4px; "
-            "background: #ECEAE6; text-align: center; color: #0B1B34; min-height: 16px; } "
-            "QProgressBar::chunk { background: #2563FF; border-radius: 3px; }"
-        )
         grid = QGridLayout(frame)
         grid.setContentsMargins(10, 7, 10, 7)
         grid.setHorizontalSpacing(12)
@@ -3475,7 +5230,9 @@ class MainWindow(QMainWindow):
             heading = QLabel(title)
             heading.setStyleSheet("font-weight: 600;")
             value = QLabel("Reading…")
+            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             bar = QProgressBar()
+            bar.setStyleSheet("QProgressBar { text-align: right; }")
             bar.setRange(0, 100)
             bar.setValue(0)
             bar.setFormat("%p% used")
@@ -3485,9 +5242,11 @@ class MainWindow(QMainWindow):
             self.metric_labels[key] = value
             self.metric_bars[key] = bar
         self.live_mesh_metric = QLabel("Mesh: no file loaded")
-        self.live_mesh_metric.setStyleSheet("color: #6B7280;")
+        self.live_mesh_metric.setProperty("muted", True)
+        self.live_mesh_metric.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.io_metric = QLabel("I/O: reading…")
-        self.io_metric.setStyleSheet("color: #6B7280;")
+        self.io_metric.setProperty("muted", True)
+        self.io_metric.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.io_metric.setToolTip(
             "Total data read and written by MeshMill since it opened. Active time counts sampled "
             "intervals in which I/O changed. Peak samples are the largest totals observed during "
@@ -3496,21 +5255,119 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.io_metric, 3, 0, 1, 4)
         grid.addWidget(self.live_mesh_metric, 4, 0, 1, 4)
         self.capacity_metric = QLabel("Capacity: calculating…")
-        self.capacity_metric.setStyleSheet("color: #6B7280;")
+        self.capacity_metric.setProperty("muted", True)
         self.capacity_metric.setWordWrap(True)
+        self.capacity_metric.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.capacity_metric.setToolTip(
             "Estimated from currently available memory, the configured memory budget, CPU "
             "count, and overview chunk size. Geometry operations currently run one at a time."
         )
         grid.addWidget(self.capacity_metric, 5, 0, 1, 4)
+        self.runtime_metric = QLabel("Runtime: no completed operation")
+        self.runtime_metric.setProperty("muted", True)
+        self.runtime_metric.setWordWrap(False)
+        self.runtime_metric.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.runtime_metric.setToolTip(
+            "Left: completed jobs and total processing time for this session. Right: the most "
+            "recent operation and time spent in its main stages."
+        )
+        grid.addWidget(self.runtime_metric, 6, 0, 1, 4)
         self.geometry_activity_graph = GeometryActivityGraph(frame)
+        self.geometry_activity_graph.configure_history(
+            self.metrics_refresh_ms, self.metrics_history_minutes, self.metrics_visible_seconds
+        )
         self.geometry_activity_graph.setToolTip("CPU, GPU, and geometry activity.")
-        grid.addWidget(self.geometry_activity_graph, 6, 0, 1, 4)
+        history_controls = QHBoxLayout()
+        self.metrics_timeline_label = QLabel()
+        self.metrics_timeline_label.setProperty("muted", True)
+        history_controls.addStretch(1)
+        history_controls.addWidget(self.metrics_timeline_label)
+        self.metrics_zoom_out = QPushButton("−")
+        self.metrics_zoom_out.setProperty("quiet", True)
+        self.metrics_zoom_out.setFixedWidth(30)
+        self.metrics_zoom_out.setToolTip("Show more time in the metrics graph.")
+        self.metrics_zoom_in = QPushButton("+")
+        self.metrics_zoom_in.setProperty("quiet", True)
+        self.metrics_zoom_in.setFixedWidth(30)
+        self.metrics_zoom_in.setToolTip("Zoom in to a shorter time range in the metrics graph.")
+        self.metrics_zoom_out.clicked.connect(lambda: self._adjust_metrics_timeline(1))
+        self.metrics_zoom_in.clicked.connect(lambda: self._adjust_metrics_timeline(-1))
+        history_controls.addWidget(self.metrics_zoom_out)
+        history_controls.addWidget(self.metrics_zoom_in)
+        grid.addLayout(history_controls, 7, 0, 1, 4)
+        self.metrics_history_scroll = QScrollArea(frame)
+        self.metrics_history_scroll.setWidgetResizable(False)
+        self.metrics_history_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.metrics_history_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.metrics_history_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.metrics_history_scroll.setWidget(self.geometry_activity_graph)
+        self.metrics_follow_latest = True
+        self.metrics_timeline_dragging = False
+        metrics_scrollbar = self.metrics_history_scroll.horizontalScrollBar()
+        metrics_scrollbar.sliderPressed.connect(self._pause_metrics_follow)
+        metrics_scrollbar.sliderMoved.connect(self._metrics_timeline_moved)
+        metrics_scrollbar.sliderReleased.connect(self._resume_metrics_follow_if_latest)
+        grid.addWidget(self.metrics_history_scroll, 8, 0, 1, 4)
+        self._configure_metrics_history()
         parent_layout.addWidget(frame)
         frame.hide()
 
+    def _configure_metrics_history(self) -> None:
+        graph = getattr(self, "geometry_activity_graph", None)
+        scroll = getattr(self, "metrics_history_scroll", None)
+        if graph is None or scroll is None:
+            return
+        graph.configure_history(
+            self.metrics_refresh_ms,
+            self.metrics_history_minutes,
+            self.metrics_visible_seconds,
+            scroll.viewport().width(),
+        )
+        label = getattr(self, "metrics_timeline_label", None)
+        if label is not None:
+            label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            label.setText(f"Timeline: {self.metrics_visible_seconds} s")
+        self._follow_latest_metrics_history()
+
+    def _pause_metrics_follow(self) -> None:
+        self.metrics_timeline_dragging = True
+        self.metrics_follow_latest = False
+
+    def _metrics_timeline_moved(self, _position: int) -> None:
+        self.metrics_follow_latest = False
+
+    def _resume_metrics_follow_if_latest(self) -> None:
+        self.metrics_timeline_dragging = False
+        scroll = getattr(self, "metrics_history_scroll", None)
+        if scroll is None:
+            return
+        bar = scroll.horizontalScrollBar()
+        self.metrics_follow_latest = bar.value() >= bar.maximum() - 1
+        self._follow_latest_metrics_history()
+
+    def _follow_latest_metrics_history(self) -> None:
+        scroll = getattr(self, "metrics_history_scroll", None)
+        if (
+            scroll is None
+            or not getattr(self, "metrics_follow_latest", True)
+            or getattr(self, "metrics_timeline_dragging", False)
+        ):
+            return
+        bar = scroll.horizontalScrollBar()
+        QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
+
+    def _adjust_metrics_timeline(self, direction: int) -> None:
+        levels = (10, 30, 60, 120, 300)
+        index = min(range(len(levels)), key=lambda item: abs(levels[item] - self.metrics_visible_seconds))
+        index = max(0, min(len(levels) - 1, index + direction))
+        self.metrics_visible_seconds = levels[index]
+        self._configure_metrics_history()
+        self.settings.setValue("metrics/visible_seconds", self.metrics_visible_seconds)
+
     def _toggle_metrics(self, visible: bool) -> None:
         self.metrics_frame.setVisible(visible)
+        if visible:
+            QTimer.singleShot(0, self._configure_metrics_history)
         self.metrics_toggle.setText("Hide metrics  ▼" if visible else "Metrics  ▲")
         self._refresh_viewport_layout()
         # Windows can defer resizing the native VTK child in a maximized window. Repeat
@@ -3546,10 +5403,9 @@ class MainWindow(QMainWindow):
         self._position_orientation_overlays()
         self._position_loading_panel()
         if hasattr(self, "density_legend"):
-            self.density_legend.move(
-                max(14, self.vtk_widget.width() - self.density_legend.width() - 14),
-                14,
-            )
+            self.density_legend.adjustSize()
+            self._position_overlay_in_corner(self.density_legend, "density")
+            self._apply_rounded_mask(self.density_legend, 9)
         if self.measure_info_frame is not None and self.measure_info_frame.isVisible():
             self.measure_info_frame.adjustSize()
             self.measure_info_frame.move(
@@ -3580,8 +5436,30 @@ class MainWindow(QMainWindow):
         )
         widget.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
+    def _normalize_viewport_overlay_corners(self) -> None:
+        """Keep visible viewport overlays in distinct corners."""
+        used: set[str] = set()
+        for key, (_label, default_corner) in VIEWPORT_OVERLAYS.items():
+            corner = self.viewport_overlay_corners.get(key, default_corner)
+            if corner not in VIEWPORT_CORNERS:
+                corner = default_corner
+            if self.viewport_overlay_visible.get(key, True):
+                if corner in used:
+                    corner = next(candidate for candidate in VIEWPORT_CORNERS if candidate not in used)
+                used.add(corner)
+            self.viewport_overlay_corners[key] = corner
+
+    def _overlay_is_visible(self, key: str) -> bool:
+        return bool(self.viewport_overlay_visible.get(key, True))
+
+    def _position_overlay_in_corner(self, widget: QWidget, key: str, margin: int = 14) -> None:
+        corner = self.viewport_overlay_corners.get(key, VIEWPORT_OVERLAYS[key][1])
+        x = margin if corner.endswith("left") else max(margin, self.vtk_widget.width() - widget.width() - margin)
+        y = margin if corner.startswith("Top") else max(margin, self.vtk_widget.height() - widget.height() - margin)
+        widget.move(x, y)
+
     def _create_density_legend(self) -> None:
-        self.density_legend = QLabel(self.vtk_widget)
+        self.density_legend = DensityLegend(self.vtk_widget)
         self.density_legend.setText(
             "POINT DENSITY   <span style='color:#123070'>Sparse</span>  "
             "<span style='color:#199AD6'>●</span> "
@@ -3648,7 +5526,15 @@ class MainWindow(QMainWindow):
                 )
 
         try:
-            load, dedicated_bytes = self.gpu_counters.sample()
+            cuda_sample = (
+                self.cuda_counters.sample(self.gpu_preference)
+                if self.cuda_device_list
+                else None
+            )
+            if cuda_sample is None:
+                load, dedicated_bytes = self.gpu_counters.sample()
+            else:
+                load, dedicated_bytes = cuda_sample
             gpu = load
             self.metric_bars["gpu"].setValue(round(load))
             self.metric_bars["gpu"].setFormat("%p% used")
@@ -3724,7 +5610,12 @@ class MainWindow(QMainWindow):
         else:
             self.io_metric.setText("I/O counters unavailable")
 
-        memory_budget = max(1, round(available_memory * self.large_mesh_memory_percent / 100.0))
+        if self.busy or not self._capacity_available_memory:
+            self._capacity_available_memory = available_memory
+        capacity_available_memory = self._capacity_available_memory
+        memory_budget = max(
+            1, round(capacity_available_memory * self.large_mesh_memory_percent / 100.0)
+        )
         estimated_triangles = max(1, memory_budget // ESTIMATED_BYTES_PER_TRIANGLE)
         estimated_vertices = estimated_triangles // 2
         overview_triangle_limit = automatic_overview_triangle_limit(
@@ -3791,6 +5682,7 @@ class MainWindow(QMainWindow):
             point_count,
             triangle_count,
         )
+        self._configure_metrics_history()
 
     def _mark_geometry_activity(self, label: str, seconds: float = 2.0) -> None:
         self.geometry_activity_label = label
@@ -3823,14 +5715,6 @@ class MainWindow(QMainWindow):
         self.loading_frame = QFrame(self.vtk_widget)
         self.loading_frame.setObjectName("loadingPanel")
         self.loading_frame.setFixedWidth(430)
-        self.loading_frame.setStyleSheet(
-            "QFrame#loadingPanel { background: rgba(247, 245, 241, 245); "
-            "border: 1px solid #B8C7DF; border-radius: 12px; } "
-            "QLabel { background: transparent; color: #0B1B34; } "
-            "QProgressBar { min-height: 10px; max-height: 10px; border: 0; "
-            "border-radius: 5px; background: #DCE2EC; } "
-            "QProgressBar::chunk { background: #2563FF; border-radius: 5px; }"
-        )
         layout = QVBoxLayout(self.loading_frame)
         layout.setContentsMargins(22, 18, 22, 18)
         layout.setSpacing(8)
@@ -3838,29 +5722,272 @@ class MainWindow(QMainWindow):
         self.loading_heading.setStyleSheet("font-size: 18px; font-weight: 700;")
         layout.addWidget(self.loading_heading)
         self.loading_file_label = QLabel("Reading STL…")
-        self.loading_file_label.setWordWrap(True)
-        layout.addWidget(self.loading_file_label)
+        self.loading_file_label.hide()
         self.loading_detail_label = QLabel("Reading triangles and welding shared vertices.")
-        self.loading_detail_label.setStyleSheet("color: #5E6B80;")
-        self.loading_detail_label.setWordWrap(True)
-        layout.addWidget(self.loading_detail_label)
+        self.loading_detail_label.hide()
+        self.loading_metrics_row = QWidget(self.loading_frame)
+        metrics_layout = QHBoxLayout(self.loading_metrics_row)
+        metrics_layout.setContentsMargins(0, 0, 0, 0)
+        metrics_layout.setSpacing(5)
+        self.loading_metric_labels: dict[str, QLabel] = {}
+        for key in ("gpu", "vram", "cpu", "ram"):
+            label = QLabel(key.upper(), self.loading_metrics_row)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            label.setProperty("loadingMetric", True)
+            metrics_layout.addWidget(label, 1)
+            self.loading_metric_labels[key] = label
+        layout.addWidget(self.loading_metrics_row)
+        self.loading_steps_label = QLabel()
+        self.loading_steps_label.hide()
+        self.loading_overall_label = QLabel()
+        self.loading_overall_label.hide()
+        self.loading_overall_progress = QProgressBar()
+        self.loading_overall_progress.setRange(0, 100)
+        self.loading_overall_progress.setValue(0)
+        self.loading_overall_progress.setFormat("Overall %p%")
+        layout.addWidget(self.loading_overall_progress)
+        self.loading_step_label = QLabel()
+        self.loading_step_label.hide()
         self.loading_progress = QProgressBar()
-        self.loading_progress.setRange(0, 0)
-        self.loading_progress.setTextVisible(False)
+        self.loading_progress.setRange(0, 100)
+        self.loading_progress.setValue(0)
+        self.loading_progress.setFormat("Current step %p%")
         layout.addWidget(self.loading_progress)
         self.loading_elapsed_label = QLabel("Starting…")
-        self.loading_elapsed_label.setStyleSheet("color: #6B7280; font-size: 11px;")
+        self.loading_elapsed_label.setProperty("muted", True)
         layout.addWidget(self.loading_elapsed_label)
         self.progress_cancel_button = QPushButton("Cancel", self.loading_frame)
         self.progress_cancel_button.setToolTip(
             "Cancel this operation and restore the preceding mesh, selection, and settings."
         )
         self.progress_cancel_button.clicked.connect(self._cancel_mesh_operation)
+        self.progress_cancel_button.setMinimumHeight(32)
+        self.progress_cancel_button.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self.progress_cancel_button.setEnabled(False)
         layout.addWidget(self.progress_cancel_button)
         self.loading_frame.adjustSize()
         self._apply_rounded_mask(self.loading_frame, 12)
         self.loading_frame.hide()
+
+    def _update_loading_metrics(self) -> None:
+        """Render a compact, live resource row without duplicating operation text."""
+        if not hasattr(self, "loading_metric_labels") or not hasattr(self, "metric_bars"):
+            return
+        device = next(
+            (
+                item
+                for item in self.cuda_device_list
+                if item["pci_bus_id"] == self.gpu_preference
+            ),
+            None,
+        )
+        gpu_name = f"GPU {device['id']}" if device is not None else "GPU Auto"
+        self.loading_metric_labels["gpu"].setText(
+            f"{gpu_name}  {self.metric_bars['gpu'].value()}%"
+        )
+        self.loading_metric_labels["vram"].setText(
+            f"VRAM  {self.metric_bars['vram'].value()}%"
+        )
+        self.loading_metric_labels["cpu"].setText(
+            f"CPU  {self.metric_bars['cpu'].value()}%"
+        )
+        self.loading_metric_labels["ram"].setText(
+            f"RAM  {self.metric_bars['ram'].value()}%"
+        )
+
+    def _operation_step_plan(self, title: str) -> list[str]:
+        """Return the user-visible stages for one operation in their execution order."""
+        result_analysis = [
+            "Preparing result analysis",
+            "Analyzing results",
+            "Measuring surface area",
+            "Preparing topology edges",
+            "Sorting topology edges",
+            "Checking mesh topology",
+            "Preparing optimized mesh",
+        ]
+        if title == "Analyzing point density":
+            return [
+                "Measuring triangle density",
+                "Smoothing density regions",
+                "Coloring density regions",
+            ]
+        if title == "Loading":
+            return [
+                "Reading mesh",
+                "Measuring mesh bounds",
+                "Planning spatial tiles",
+                "Writing spatial tiles",
+                "Spatial index ready",
+            ]
+        if title in {"Optimizing", "Optimizing selection"}:
+            first = (
+                "Analyzing depth and density on GPU"
+                if self.algorithm.currentText() == DEPTH_DENSITY_ADAPTIVE_LABEL
+                else "Analyzing surface on GPU"
+                if is_gpu_guided_algorithm(self.algorithm.currentText())
+                else "Reducing mesh topology"
+            )
+            return [first, "Reducing mesh topology", "Finishing topology and surface", *result_analysis]
+        if title == "Optimizing tiles":
+            return ["Optimizing tiles", "Assembling optimized mesh", "Loading optimized mesh", *result_analysis]
+        return ["Preparing mesh", title]
+
+    def _reset_operation_steps(self, title: str) -> None:
+        self.operation_steps = self._operation_step_plan(title)
+        self.operation_step_index = 0
+        self._render_operation_steps()
+        self.loading_overall_progress.setRange(0, 100)
+        self.loading_overall_progress.setValue(0)
+        self.loading_progress.setRange(0, 100)
+        self.loading_progress.setValue(0)
+
+    @staticmethod
+    def _runtime_bucket(stage: str) -> str:
+        """Group progress stages into concise, user-facing runtime categories."""
+        normalized = stage.casefold()
+        if any(token in normalized for token in ("read", "load", "writing spatial", "planning spatial")):
+            return "Reading and indexing"
+        if any(token in normalized for token in ("assembling", "preparing optimized mesh")):
+            return "Output assembly"
+        if any(
+            token in normalized
+            for token in ("analyzing surface", "analyzing depth", "triangle density", "smoothing density")
+        ):
+            return "Surface analysis"
+        if any(
+            token in normalized
+            for token in ("reducing", "optimizing tiles", "finishing topology")
+        ):
+            return "Mesh reduction"
+        if any(
+            token in normalized
+            for token in (
+                "analyzing results",
+                "surface area",
+                "topology edges",
+                "sorting topology",
+                "checking mesh topology",
+                "bounds",
+                "coloring density",
+            )
+        ):
+            return "Result checks"
+        return "Preparation"
+
+    @staticmethod
+    def _runtime_category_order() -> tuple[str, ...]:
+        return (
+            "Preparation",
+            "Reading and indexing",
+            "Surface analysis",
+            "Mesh reduction",
+            "Result checks",
+            "Output assembly",
+        )
+
+    @staticmethod
+    def _runtime_category_short_name(category: str) -> str:
+        return {
+            "Preparation": "Prep",
+            "Reading and indexing": "Read/index",
+            "Surface analysis": "Surface",
+            "Mesh reduction": "Reduction",
+            "Result checks": "Checks",
+            "Output assembly": "Assembly",
+        }.get(category, category)
+
+    def _start_operation_runtime(self, initial_stage: str = "Preparing") -> None:
+        started_at = time.monotonic()
+        self.operation_runtime_started_at = started_at
+        self.operation_runtime_stage_started_at = started_at
+        self.operation_runtime_stage = initial_stage
+        self.operation_runtime_seconds = {}
+
+    def _transition_operation_runtime(self, stage: str) -> None:
+        if not stage:
+            return
+        if self.operation_runtime_started_at <= 0.0:
+            self._start_operation_runtime(stage)
+            return
+        if stage == self.operation_runtime_stage:
+            return
+        now = time.monotonic()
+        elapsed = max(0.0, now - self.operation_runtime_stage_started_at)
+        bucket = self._runtime_bucket(self.operation_runtime_stage)
+        self.operation_runtime_seconds[bucket] = (
+            self.operation_runtime_seconds.get(bucket, 0.0) + elapsed
+        )
+        self.operation_runtime_stage = stage
+        self.operation_runtime_stage_started_at = now
+
+    def _finish_operation_runtime(self) -> None:
+        if self.operation_runtime_started_at <= 0.0:
+            return
+        now = time.monotonic()
+        elapsed = max(0.0, now - self.operation_runtime_stage_started_at)
+        bucket = self._runtime_bucket(self.operation_runtime_stage)
+        self.operation_runtime_seconds[bucket] = (
+            self.operation_runtime_seconds.get(bucket, 0.0) + elapsed
+        )
+        total = max(0.0, now - self.operation_runtime_started_at)
+        self.last_operation_runtime = dict(self.operation_runtime_seconds)
+        self.last_operation_name = self.active_operation
+        self.runtime_operation_count += 1
+        self.runtime_total_seconds += total
+        for name, seconds in self.last_operation_runtime.items():
+            if seconds <= 0.005:
+                continue
+            self.runtime_aggregate_seconds[name] = (
+                self.runtime_aggregate_seconds.get(name, 0.0) + seconds
+            )
+            self.runtime_aggregate_counts[name] = self.runtime_aggregate_counts.get(name, 0) + 1
+        if hasattr(self, "runtime_metric"):
+            last_parts = []
+            for name in self._runtime_category_order():
+                seconds = self.last_operation_runtime.get(name, 0.0)
+                if seconds > 0.005:
+                    last_parts.append(
+                        f"{self._runtime_category_short_name(name)} {seconds:.1f}s"
+                    )
+            detail = "  •  ".join(last_parts) if last_parts else "No measurable stages"
+            self.runtime_metric.setText(
+                f"Session: {self.runtime_operation_count} jobs • {self.runtime_total_seconds:.1f}s  |  "
+                f"Latest: {self.last_operation_name} {total:.1f}s • {detail}"
+            )
+        self.operation_runtime_started_at = 0.0
+        self.operation_runtime_stage_started_at = 0.0
+        self.operation_runtime_stage = ""
+        self.operation_runtime_seconds = {}
+
+    def _render_operation_steps(self) -> None:
+        # Step names remain in the operation plan for the overall calculation. The compact
+        # panel shows their count and current stage instead of a verbose checklist.
+        return
+
+    def _update_operation_step_progress(self, stage: str, completed: int, total: int) -> None:
+        self._transition_operation_runtime(stage)
+        if stage not in self.operation_steps:
+            self.operation_steps.append(stage)
+        self.operation_step_index = self.operation_steps.index(stage)
+        step_fraction = max(0.0, min(1.0, completed / total)) if total > 0 else 0.0
+        overall = round(100.0 * (self.operation_step_index + step_fraction) / len(self.operation_steps))
+        self.loading_overall_progress.setValue(overall)
+        self.loading_overall_progress.setFormat(
+            f"Overall {overall}%  •  step {self.operation_step_index + 1}/{len(self.operation_steps)}"
+        )
+        if total > 0:
+            self.loading_progress.setRange(0, total)
+            self.loading_progress.setValue(max(0, min(completed, total)))
+            self.loading_progress.setFormat(f"{stage}  •  %p%")
+        else:
+            self.loading_progress.setRange(0, 100)
+            self.loading_progress.setValue(0)
+            self.loading_progress.setFormat("Waiting for work")
+        self._render_operation_steps()
 
     def _position_loading_panel(self) -> None:
         if not hasattr(self, "loading_frame"):
@@ -3878,6 +6005,55 @@ class MainWindow(QMainWindow):
             return
         elapsed = max(0.0, time.monotonic() - self.load_started_at)
         self.loading_elapsed_label.setText(f"Elapsed: {elapsed:.1f} s")
+        if self.operation_progress_path is not None:
+            try:
+                progress_state = json.loads(
+                    self.operation_progress_path.read_text(encoding="utf-8")
+                )
+                stage = str(progress_state.get("stage", ""))
+                completed = int(progress_state.get("completed", 0))
+                total = int(progress_state.get("total", 0))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                stage, completed, total = "", 0, 0
+            if stage and stage != self.operation_progress_stage:
+                self.operation_progress_stage = stage
+                details = {
+                    "Analyzing surface on GPU": "Surface analysis",
+                    "Analyzing depth and density on GPU": "Depth and density analysis",
+                    "Reducing mesh topology": "Reducing topology",
+                    "Finishing topology and surface": "Finishing reduction",
+                    "Preparing result analysis": "Preparing analysis",
+                    "Analyzing results": "Measuring result quality",
+                    "Measuring surface area": "Measuring surface area",
+                    "Preparing topology edges": "Preparing topology",
+                    "Sorting topology edges": "Sorting topology",
+                    "Checking mesh topology": "Checking topology",
+                    "Measuring triangle density": "Measuring density",
+                    "Smoothing density regions": "Smoothing density",
+                    "Coloring density regions": "Coloring density",
+                    "Preparing optimized mesh": "Preparing viewport",
+                    "Optimizing tiles": "Optimizing tiles",
+                    "Assembling optimized mesh": "Assembling mesh",
+                    "Loading optimized mesh": "Loading result",
+                    "Reading mesh": "Reading mesh",
+                    "Measuring mesh bounds": "Measuring bounds",
+                    "Planning spatial tiles": "Planning tiles",
+                    "Writing spatial tiles": "Writing tiles",
+                    "Spatial index ready": "Tile index ready",
+                }
+                self.loading_heading.setText(stage)
+                self.loading_detail_label.setText(details.get(stage, "Processing mesh data"))
+            if stage:
+                self._update_operation_step_progress(stage, completed, total)
+        self._update_loading_metrics()
+        if (
+            self.loading
+            and self.load_geometry_ready
+            and self.gpu_warmup_future is not None
+            and not self.gpu_warmup_future.done()
+        ):
+            self.loading_heading.setText("Preparing GPU optimization")
+            self.loading_detail_label.setText("Initializing GPU runtime")
 
     def _set_controls_busy(self, busy: bool) -> None:
         interactive_types = (QPushButton, QCheckBox, QComboBox, QSpinBox, QSlider)
@@ -3940,6 +6116,7 @@ class MainWindow(QMainWindow):
         if not self.busy:
             return
         cancelled_title = self.active_operation or "Operation"
+        cancelled_selection_optimization = cancelled_title == "Optimizing selection"
         if self.operation_cancel_event is not None:
             self.operation_cancel_event.set()
         if self.operation_future is not None:
@@ -3962,6 +6139,8 @@ class MainWindow(QMainWindow):
         self.pending_target = None
         self.running_target = None
         self.loading = False
+        self.load_geometry_ready = False
+        self.gpu_warmup_future = None
 
         # Native mesh routines may not expose an interruption hook. Retire their worker so a
         # cancelled native call cannot block the next requested operation.
@@ -3998,7 +6177,9 @@ class MainWindow(QMainWindow):
             )
             for widget, enabled in snapshot["button_states"].items():
                 widget.setEnabled(enabled)
-            if self.crop_candidate is not None:
+            if cancelled_selection_optimization:
+                self._clear_selection(message=None)
+            elif self.crop_candidate is not None:
                 self._show_crop_highlight(self.crop_candidate[0])
                 self._update_crop_overlay()
             elif self.selected_face_mask is not None and self.selected_face_mask.any():
@@ -4008,35 +6189,47 @@ class MainWindow(QMainWindow):
                     self._set_actor_display_mode(actor)
             self._update_dimension_labels()
             self._sync_slider_from_target()
-            if self._selected_triangle_count():
+            if not cancelled_selection_optimization and self._selected_triangle_count():
                 self._show_selection_primary_action()
             self.vtk_widget.GetRenderWindow().Render()
-        self.status.setText(f"{cancelled_title} cancelled • previous state restored")
+        if cancelled_selection_optimization:
+            self.status.setText("Selection optimization cancelled • selection cleared")
+        else:
+            self.status.setText(f"{cancelled_title} cancelled • previous state restored")
 
     def _begin_mesh_operation(self, title: str, detail: str) -> int:
         self.timer.stop()
+        # The retained-selection action card is useful while editing. Once an operation starts,
+        # the single progress panel is the only operation overlay.
+        if self.crop_info_frame is not None:
+            self.crop_info_frame.hide()
         self._capture_operation_snapshot()
         self._mark_geometry_activity(title, 2.0)
         self.edit_generation += 1
         self.busy = True
         self.operation_uses_process = False
+        self._clear_operation_progress()
         self.active_operation = title
         self.load_started_at = time.monotonic()
+        self._start_operation_runtime()
+        self._last_loading_metric_refresh = 0.0
+        self.load_geometry_ready = False
+        self.gpu_warmup_future = None
         self._set_controls_busy(True)
+        self._reset_operation_steps(title)
         self.loading_heading.setText(title)
         self.loading_file_label.setText(detail)
-        self.loading_detail_label.setText("Processing mesh data")
+        self.loading_detail_label.setText("Preparing geometry")
         self.loading_elapsed_label.setText("Starting…")
         self.loading_frame.show()
         self._position_loading_panel()
         self.loading_frame.raise_()
         self.loading_timer.start()
-        self.loading_progress.setRange(0, 0)
-        self.loading_progress.setTextVisible(False)
         QApplication.processEvents()
         return self.edit_generation
 
     def _end_mesh_operation(self) -> None:
+        self._finish_operation_runtime()
         self.loading_timer.stop()
         self.loading_frame.hide()
         self._set_controls_busy(False)
@@ -4046,18 +6239,32 @@ class MainWindow(QMainWindow):
         self.operation_cancel_event = None
         self.operation_future = None
         self.operation_uses_process = False
+        self._clear_operation_progress()
         self._sync_modified_mesh_actions()
+
+    def _clear_operation_progress(self) -> None:
+        progress_path = self.operation_progress_path
+        self.operation_progress_path = None
+        self.operation_progress_stage = ""
+        if progress_path is not None:
+            try:
+                progress_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _start_operation_progress(self, token: int, stage: str) -> str:
+        progress_path = Path(tempfile.gettempdir()) / (
+            f"meshmill-progress-{os.getpid()}-{token}.txt"
+        )
+        self.operation_progress_path = progress_path
+        self.operation_progress_stage = ""
+        _write_process_progress(os.fspath(progress_path), stage, 0, 1)
+        self._transition_operation_runtime(stage)
+        return os.fspath(progress_path)
 
     def _create_view_pad(self) -> None:
         self.view_pad = QFrame(self.vtk_widget)
         self.view_pad.setObjectName("viewPad")
-        self.view_pad.setStyleSheet(
-            "QFrame#viewPad { background: rgba(251, 250, 248, 245); border: 1px solid #D8DCE5; "
-            "border-radius: 7px; } QPushButton { min-width: 58px; min-height: 27px; "
-            "padding: 2px 6px; background: #FFFFFF; color: #0B1B34; border: 1px solid #D8DCE5; "
-            "border-radius: 4px; } QPushButton:hover { background: #F1F5FF; border-color: #2563FF; } "
-            "QPushButton:checked { background: #2563FF; color: #FFFFFF; border-color: #1D4ED8; }"
-        )
         grid = QGridLayout(self.view_pad)
         grid.setContentsMargins(7, 7, 7, 7)
         grid.setHorizontalSpacing(5)
@@ -4080,7 +6287,8 @@ class MainWindow(QMainWindow):
             self.view_buttons[direction] = button
         orientation_help = QLabel("Click: view  •  Ctrl+click: set this view", self.view_pad)
         orientation_help.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        orientation_help.setStyleSheet("color: #6B7280; padding: 1px 3px;")
+        orientation_help.setProperty("muted", True)
+        orientation_help.setStyleSheet("padding: 1px 3px;")
         grid.addWidget(orientation_help, 2, 0, 1, 3)
         self._refresh_view_button_tooltips()
         self.orientation_indicator = OrientationIndicator(self.vtk_widget)
@@ -4122,8 +6330,23 @@ class MainWindow(QMainWindow):
             camera.GetFocalPoint(),
             camera.GetViewUp(),
             orientation,
+            getattr(self, "orientation_reference_basis", None),
         )
         self._update_scale_bar(camera)
+
+    def _set_orientation_reference(self, camera=None) -> None:
+        """Use the current camera frame as the local zero for the viewport indicator."""
+        camera = camera or self.renderer.GetActiveCamera()
+        position = np.asarray(camera.GetPosition(), dtype=float)
+        focal = np.asarray(camera.GetFocalPoint(), dtype=float)
+        forward = focal - position
+        forward /= max(float(np.linalg.norm(forward)), 1e-12)
+        up = np.asarray(camera.GetViewUp(), dtype=float)
+        up -= forward * float(up @ forward)
+        up /= max(float(np.linalg.norm(up)), 1e-12)
+        right = np.cross(forward, up)
+        right /= max(float(np.linalg.norm(right)), 1e-12)
+        self.orientation_reference_basis = np.column_stack((right, up, forward))
 
     def _update_scale_bar(self, camera=None) -> None:
         if not hasattr(self, "scale_bar") or self.source_poly is None:
@@ -4153,7 +6376,9 @@ class MainWindow(QMainWindow):
         decimals = max(0, -exponent)
         label = f"{nice:,.{min(decimals, 3)}f} {unit}"
         self.scale_bar.set_scale(label, pixels)
-        self.scale_bar.show()
+        self._apply_rounded_mask(self.scale_bar, 8)
+        self._position_orientation_overlays()
+        self.scale_bar.setVisible(self._overlay_is_visible("scale"))
         self.scale_bar.raise_()
 
     def _update_active_view_button(self, camera=None) -> None:
@@ -4185,24 +6410,23 @@ class MainWindow(QMainWindow):
     def _position_view_pad(self) -> None:
         if not hasattr(self, "view_pad"):
             return
-        margin = 14
         self.view_pad.adjustSize()
-        x = margin
-        y = max(margin, self.vtk_widget.height() - self.view_pad.height() - margin)
-        self.view_pad.move(x, y)
-        if not self.view_pad.isVisible():
+        self._position_overlay_in_corner(self.view_pad, "views")
+        if self._overlay_is_visible("views") and not self.view_pad.isVisible():
             self.view_pad.show()
+        elif not self._overlay_is_visible("views"):
+            self.view_pad.hide()
         self.view_pad.raise_()
 
     def _position_orientation_overlays(self) -> None:
         if hasattr(self, "orientation_indicator"):
-            self.orientation_indicator.move(14, 14)
+            self._position_overlay_in_corner(self.orientation_indicator, "orientation")
+            self.orientation_indicator.setVisible(self._overlay_is_visible("orientation"))
             self.orientation_indicator.raise_()
         if hasattr(self, "scale_bar"):
-            self.scale_bar.move(
-                max(14, self.vtk_widget.width() - self.scale_bar.width() - 14),
-                max(14, self.vtk_widget.height() - self.scale_bar.height() - 14),
-            )
+            self._position_overlay_in_corner(self.scale_bar, "scale")
+            if not self._overlay_is_visible("scale"):
+                self.scale_bar.hide()
             self.scale_bar.raise_()
 
     def _set_standard_view(self, direction: str) -> None:
@@ -4234,9 +6458,10 @@ class MainWindow(QMainWindow):
         self.renderer.ResetCamera(*bounds)
         camera.SetViewUp(*view_up)
         camera.OrthogonalizeViewUp()
+        self._set_orientation_reference(camera)
         self.renderer.ResetCameraClippingRange()
         self.vtk_widget.GetRenderWindow().Render()
-        self._update_active_view_button(camera)
+        self._update_orientation_indicator()
         self.view_pad.raise_()
         self._diagnostic(
             "recall_view_complete",
@@ -4273,7 +6498,7 @@ class MainWindow(QMainWindow):
         self.saved_standard_views[direction] = (current_view.copy(), current_up.copy())
         opposite = OPPOSITE_VIEWS[direction]
         self.saved_standard_views[opposite] = (-current_view.copy(), current_up.copy())
-        self._update_active_view_button(camera)
+        self._set_orientation_reference(camera)
         self._update_orientation_indicator()
         self.vtk_widget.GetRenderWindow().Render()
         self.view_pad.raise_()
@@ -4380,6 +6605,55 @@ class MainWindow(QMainWindow):
         cross = np.asarray(((0.0, -z, y), (z, 0.0, -x), (-y, x, 0.0)))
         return np.eye(3) + math.sin(angle) * cross + (1.0 - math.cos(angle)) * (cross @ cross)
 
+    def _keyboard_view_pivot(self) -> np.ndarray | None:
+        """Return the visible mesh under the screen center for keyboard navigation."""
+        if self.renderer is None:
+            return None
+        render_window = self.vtk_widget.GetRenderWindow()
+        width, height = render_window.GetSize()
+        if width > 0 and height > 0 and self.keyboard_picker.Pick(
+            width * 0.5, height * 0.5, 0.0, self.renderer
+        ):
+            pivot = np.asarray(self.keyboard_picker.GetPickPosition(), dtype=float)
+            if pivot.shape == (3,) and np.all(np.isfinite(pivot)):
+                return pivot
+        actor = self.active_actor
+        if actor is not None:
+            bounds = np.asarray(actor.GetBounds(), dtype=float)
+            if (
+                bounds.shape == (6,)
+                and np.all(np.isfinite(bounds))
+                and np.all(bounds[[1, 3, 5]] >= bounds[[0, 2, 4]])
+            ):
+                return (bounds[[0, 2, 4]] + bounds[[1, 3, 5]]) * 0.5
+        return None
+
+    def _keyboard_zoom_at_view_center(self, factor: float) -> None:
+        """Zoom by a fixed camera-distance ratio without VTK Dolly saturation."""
+        camera = self.renderer.GetActiveCamera()
+        pivot = self._keyboard_view_pivot()
+        if pivot is None:
+            pivot = np.asarray(camera.GetFocalPoint(), dtype=float)
+        position = np.asarray(camera.GetPosition(), dtype=float)
+        offset = position - pivot
+        distance = float(np.linalg.norm(offset))
+        if distance <= 1e-12:
+            return
+        bounds = np.asarray(self.renderer.ComputeVisiblePropBounds(), dtype=float)
+        diagonal = (
+            float(np.linalg.norm(bounds[[1, 3, 5]] - bounds[[0, 2, 4]]))
+            if bounds.shape == (6,) and np.all(np.isfinite(bounds))
+            else 0.0
+        )
+        minimum_distance = max(diagonal * 1e-6, 1e-7)
+        if camera.GetParallelProjection():
+            camera.SetParallelScale(max(minimum_distance, camera.GetParallelScale() / factor))
+            camera.SetFocalPoint(*pivot)
+            return
+        next_distance = max(minimum_distance, distance / factor)
+        camera.SetPosition(*(pivot + offset * (next_distance / distance)))
+        camera.SetFocalPoint(*pivot)
+
     def _keyboard_navigate(self, key: str, control: bool, shift: bool) -> bool:
         self._detach_selection_polygon_for_navigation()
         if key in ("left", "right") and self.keyboard_horizontal:
@@ -4390,9 +6664,9 @@ class MainWindow(QMainWindow):
                 key = {"up": "down", "down": "up"}[key]
         camera = self.renderer.GetActiveCamera()
         if control and shift and key == "up":
-            camera.Dolly(1.12)
+            self._keyboard_zoom_at_view_center(1.28)
         elif control and shift and key == "down":
-            camera.Dolly(1.0 / 1.12)
+            self._keyboard_zoom_at_view_center(1.0 / 1.28)
         elif control and shift and key == "left":
             camera.Roll(5.0)
         elif control and shift and key == "right":
@@ -4422,6 +6696,9 @@ class MainWindow(QMainWindow):
                 camera.SetPosition(*(position + offset))
                 camera.SetFocalPoint(*(focal + offset))
             else:
+                pivot = self._keyboard_view_pivot()
+                if pivot is not None:
+                    camera.SetFocalPoint(*pivot)
                 if key == "left":
                     camera.Azimuth(-5.0)
                 elif key == "right":
@@ -4433,6 +6710,11 @@ class MainWindow(QMainWindow):
                 camera.OrthogonalizeViewUp()
         else:
             return False
+        # Keyboard navigation bypasses the interactor's mouse-update path. Mark the camera and
+        # refresh the compact X/Y/Z indicator immediately instead of waiting for VTK to emit a
+        # later render-side notification.
+        camera.Modified()
+        self._update_orientation_indicator()
         self.renderer.ResetCameraClippingRange()
         self.vtk_widget.GetRenderWindow().Render()
         return True
@@ -4482,7 +6764,9 @@ class MainWindow(QMainWindow):
         self.active_operation = "Loading"
         self._mark_geometry_activity("Loading geometry", 2.0)
         self.load_started_at = time.monotonic()
+        self._start_operation_runtime()
         self._set_controls_busy(True)
+        self._reset_operation_steps("Loading")
         self.loading_heading.setText("Preparing mesh")
         self.loading_file_label.setText(f"{path.name}  •  {fmt_bytes(file_size)}")
         self.loading_detail_label.setText("Reading triangles and welding vertices")
@@ -4492,6 +6776,9 @@ class MainWindow(QMainWindow):
         self.loading_frame.raise_()
         self.loading_timer.start()
         self.status.setText(f"Loading {path.name}…")
+        self.file_label.set_full_text(f"Loading: {path}")
+        self.open_file_folder_button.setEnabled(False)
+        self.copy_file_path_button.setEnabled(False)
 
         memory_budget = round(
             available_physical_memory() * self.large_mesh_memory_percent / 100.0
@@ -4499,6 +6786,25 @@ class MainWindow(QMainWindow):
         overview_triangle_limit = automatic_overview_triangle_limit(
             memory_budget, self.vram_capacity_bytes
         )
+        if gpu_backend_supported(self.gpu_preference):
+            self.gpu_warmup_future = self.optimization_executor.submit(
+                prepare_gpu_backend,
+                self.gpu_preference,
+            )
+            self.operation_uses_process = True
+        progress_path = self._start_operation_progress(token, "Reading mesh")
+
+        def load_progress(stage: str, completed: int, total: int) -> None:
+            labels = {
+                "bounds": "Measuring mesh bounds",
+                "planning": "Planning spatial tiles",
+                "partition": "Writing spatial tiles",
+                "complete": "Spatial index ready",
+            }
+            _write_process_progress(
+                progress_path, labels.get(stage, stage.capitalize()), completed, total
+            )
+
         future = self.executor.submit(
             load_stl_smart,
             path,
@@ -4507,12 +6813,25 @@ class MainWindow(QMainWindow):
             overview_triangle_limit,
             self.operation_cancel_event,
             self.geometry_processes or None,
+            load_progress,
+            self.algorithm.currentText(),
+            self.auto_tiling_enabled,
         )
         self.operation_future = future
 
         def completed(result_future) -> None:
             try:
                 poly, points, faces, metadata = result_future.result()
+                self.load_geometry_ready = True
+                if self.gpu_warmup_future is not None:
+                    metadata = dict(metadata or {})
+                    try:
+                        metadata["gpu_setup"] = self.gpu_warmup_future.result()
+                    except Exception as gpu_error:  # noqa: BLE001 - CPU methods remain usable
+                        metadata["gpu_setup"] = {
+                            "backend": "unavailable",
+                            "reason": type(gpu_error).__name__,
+                        }
                 error = None
             except Exception as exc:  # noqa: BLE001
                 poly = points = faces = None
@@ -4535,6 +6854,8 @@ class MainWindow(QMainWindow):
         if token != self.load_generation:
             return
         self.loading = False
+        self.load_geometry_ready = False
+        self.gpu_warmup_future = None
         self._end_mesh_operation()
         if error is not None or poly is None or points is None or faces is None:
             QMessageBox.critical(self, APP_NAME, f"Could not load the STL:\n\n{error}")
@@ -4546,6 +6867,12 @@ class MainWindow(QMainWindow):
         self.source_points = points
         self.source_faces = faces
         self.overview_mode = bool(metadata and metadata.get("overview"))
+        self.tiled_mode = bool(metadata and metadata.get("tiled_edit"))
+        self.tiled_index_directory = (
+            Path(metadata["index_directory"])
+            if self.tiled_mode and metadata and metadata.get("index_directory")
+            else None
+        )
         self.overview_total_triangles = int(
             metadata.get("total_triangles", len(faces)) if metadata else len(faces)
         )
@@ -4559,7 +6886,10 @@ class MainWindow(QMainWindow):
             self.measure_info_frame.hide()
         self.mesh_modified = False
         self.saved_standard_views.clear()
+        self.orientation_reference_basis = None
         self.has_committed_optimization = False
+        self.optimization_script_passes.clear()
+        self.optimization_script_omissions.clear()
         self.undo_stack.clear()
         self.redo_stack.clear()
         self.undo_bytes = 0
@@ -4574,7 +6904,7 @@ class MainWindow(QMainWindow):
         self.clear_selection_button.setEnabled(False)
         self.source_actor = None
         self.simplified_actor = None
-        self.file_label.setText(os.fspath(path))
+        self.file_label.set_full_text(os.fspath(path))
         self.open_file_folder_button.setEnabled(True)
         self.copy_file_path_button.setEnabled(True)
         self.loaded_triangle_count = self.overview_total_triangles
@@ -4596,19 +6926,23 @@ class MainWindow(QMainWindow):
         self.dimension_drift_model_units = None
         self._update_quality_metrics(None)
         with QSignalBlocker(self.target):
-            self.target.setRange(1_000, max(1_000, len(faces)))
+            self.target.setRange(1_000, max(1_000, self.overview_total_triangles))
         self._update_dynamic_presets()
         initial = smart_target(points, faces, self.smart_quality.currentText())
+        if self.tiled_mode:
+            initial = round(initial / max(1, len(faces)) * self.overview_total_triangles)
         with QSignalBlocker(self.target):
             self.target.setValue(initial)
         self._sync_slider_from_target()
-        self.preview_dirty = not self.overview_mode
-        self._set_primary_action(False, not self.overview_mode)
+        self.preview_dirty = not self.overview_mode or self.tiled_mode
+        self._set_primary_action(False, not self.overview_mode or self.tiled_mode)
         self.toggle_mesh_button.setEnabled(False)
         self.save_button.setEnabled(False)
         self.reload_button.setEnabled(False)
+        self._sync_modified_mesh_actions()
         self.showing_original = True
         self._update_estimated_size()
+        self._update_processing_plan()
         self._show_poly(poly)
         self.timer.stop()
         self.status.setText(
@@ -5258,7 +7592,9 @@ class MainWindow(QMainWindow):
                 self._delete_selected(confirm=False)
             elif action == "crop":
                 cropped, points, faces = self._poly_from_face_mask(self.selected_face_mask)
-                self._set_working_mesh(cropped, points, faces, "Cropped mesh")
+                self._set_working_mesh(
+                    cropped, points, faces, "Cropped mesh", script_omission="Crop"
+                )
             return
         cropped, points, faces, selected_face_mask = self.crop_candidate
         if action not in {"add", "crop", "optimize", "delete"}:
@@ -5281,7 +7617,9 @@ class MainWindow(QMainWindow):
             self._delete_selected(confirm=False)
             return
         if action == "crop":
-            self._set_working_mesh(cropped, points, faces, "Cropped mesh")
+            self._set_working_mesh(
+                cropped, points, faces, "Cropped mesh", script_omission="Crop"
+            )
             return
         self._optimize_selected_region(points, faces, selected_face_mask)
 
@@ -5305,15 +7643,23 @@ class MainWindow(QMainWindow):
             "Optimizing selection",
             (
                 depth_adaptive_progress_text(self.gpu_preference)
-                if algorithm.startswith("Depth Adaptive QEM")
+                if is_gpu_guided_algorithm(algorithm)
                 else f"{fmt_count(len(selected_faces))} selected triangles → about {fmt_count(target)}"
             ),
         )
         self._set_primary_action(False, False)
         cancel_event = self.operation_cancel_event
+        progress_path = self._start_operation_progress(
+            token,
+            "Analyzing depth and density on GPU"
+            if algorithm == DEPTH_DENSITY_ADAPTIVE_LABEL
+            else "Analyzing surface on GPU"
+            if is_gpu_guided_algorithm(algorithm)
+            else "Reducing mesh topology",
+        )
         self.status.setText(
             depth_adaptive_progress_text(self.gpu_preference) + "…"
-            if algorithm.startswith("Depth Adaptive QEM")
+            if is_gpu_guided_algorithm(algorithm)
             else (
                 f"Optimizing selected region: {fmt_count(len(selected_faces))} to about "
                 f"{fmt_count(target)} triangles…"
@@ -5328,6 +7674,9 @@ class MainWindow(QMainWindow):
                     target,
                     algorithm,
                     gpu_preference=self.gpu_preference,
+                    progress=lambda stage, completed, total: _write_process_progress(
+                        progress_path, stage, completed, total
+                    ),
                 )
                 if cancel_event is not None and cancel_event.is_set():
                     raise OperationCancelled
@@ -5345,7 +7694,14 @@ class MainWindow(QMainWindow):
                 merged_points = np.ascontiguousarray(combined_points[used])
                 merged_faces = np.ascontiguousarray(remap[combined_faces], dtype=np.int32)
                 metrics = mesh_quality_metrics(
-                    source_points, source_faces, merged_points, merged_faces
+                    source_points,
+                    source_faces,
+                    merged_points,
+                    merged_faces,
+                    progress=lambda stage, completed, total: _write_process_progress(
+                        progress_path, stage, completed, total
+                    ),
+                    cancel_event=cancel_event,
                 )
                 return {
                     "kind": "optimize",
@@ -5595,6 +7951,7 @@ class MainWindow(QMainWindow):
             message,
             preserve_target=(kind == "optimize"),
             committed_optimization=True if kind == "optimize" else None,
+            script_omission="Selection delete",
         )
 
     def _show_selection_optimization_preview(self, result: dict, removed: int) -> None:
@@ -5680,6 +8037,8 @@ class MainWindow(QMainWindow):
             self.showing_original,
             self.preview_dirty,
             self.has_committed_optimization,
+            tuple(self.optimization_script_passes),
+            tuple(self.optimization_script_omissions),
         )
 
     def _record_history_state(self) -> None:
@@ -5707,6 +8066,8 @@ class MainWindow(QMainWindow):
         cached_actor: vtkActor | None = None,
         modified_state: bool | None = None,
         committed_optimization: bool | None = None,
+        script_pass: dict[str, object] | None = None,
+        script_omission: str | None = None,
     ) -> None:
         self._mark_geometry_activity(message, 3.0)
         previous_target = (
@@ -5723,6 +8084,10 @@ class MainWindow(QMainWindow):
             # Working arrays are replaced, never modified in place, so retaining references makes
             # undo instantaneous even for multi-million-triangle scans.
             self._record_history_state()
+        if script_pass is not None:
+            self.optimization_script_passes.append(script_pass)
+        if script_omission and script_omission not in self.optimization_script_omissions:
+            self.optimization_script_omissions.append(script_omission)
         self.timer.stop()
         self._cancel_crop(None)
         self._reset_previous_view()
@@ -5764,7 +8129,7 @@ class MainWindow(QMainWindow):
         self._set_primary_action(False, len(faces) > 1_000)
         self.toggle_mesh_button.setEnabled(False)
         self.toggle_mesh_button.setText("Show original")
-        self.save_button.setEnabled(self.mesh_modified)
+        self._sync_modified_mesh_actions()
         self.showing_original = True
         self._update_dimension_labels()
         self._update_estimated_size()
@@ -5840,6 +8205,8 @@ class MainWindow(QMainWindow):
         self.showing_original = state.showing_original
         self.preview_dirty = state.preview_dirty
         self.has_committed_optimization = state.committed_optimization
+        self.optimization_script_passes = list(state.optimization_script_passes)
+        self.optimization_script_omissions = list(state.optimization_script_omissions)
         self._update_save_button_label()
 
         self.original_count.setText(fmt_count(len(state.faces)))
@@ -5915,6 +8282,7 @@ class MainWindow(QMainWindow):
             self.preview_poly is not None and self.preview_poly is not self.source_poly
         )
         self._update_estimated_size()
+        self._update_processing_plan()
         self._sync_slider_from_target()
 
     def _update_dynamic_presets(self, selection_total: int | None = None) -> None:
@@ -5925,6 +8293,84 @@ class MainWindow(QMainWindow):
                 else self.target.value()
             )
             self.target_display.setText(fmt_count(int(target)))
+
+    def _smart_quality_changed(self, quality: str) -> None:
+        if quality in SMART_DIVISORS:
+            self.last_quality = quality
+            self.settings.setValue("optimization/last_quality", quality)
+        self._apply_smart_target()
+        self._update_processing_plan()
+
+    def _processing_route_changed(self, _index: int) -> None:
+        self.large_mesh_mode = str(self.processing_route.currentData() or "auto")
+        self.settings.setValue("performance/large_mesh_mode", self.large_mesh_mode)
+        self._update_processing_plan()
+
+    def _update_processing_plan(self) -> None:
+        if not hasattr(self, "processing_plan"):
+            return
+        triangle_count = self.overview_total_triangles or (
+            len(self.source_faces) if self.source_faces is not None else 0
+        )
+        if not triangle_count:
+            self.processing_plan.setText("Processing: open a mesh to estimate time and quality")
+            return
+
+        workers = self.geometry_processes or min(8, max(1, self.logical_cpu_count // 2))
+        algorithm = self.algorithm.currentText()
+        index_ready = False
+        if self.source_path is not None:
+            try:
+                index_ready = index_matches(
+                    self.source_path,
+                    load_manifest(default_index_directory(self.source_path)),
+                )
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                pass
+
+        route = self.large_mesh_mode
+        if is_gpu_guided_algorithm(algorithm):
+            scale = triangle_count / 4_126_315
+            full_seconds = 12.55 * scale
+            tiled_seconds = 27.30 * scale
+            use_tiled = route == "tiled"
+            if route == "auto":
+                use_tiled = False
+            if use_tiled:
+                text = (
+                    f"Tiled • {workers} workers • est. {tiled_seconds:.1f} s • "
+                    "avg error +11% • peak error +8%"
+                )
+            else:
+                route_label = "Auto → full mesh" if route == "auto" else "Full mesh"
+                text = (
+                    f"{route_label} • single mesh • est. {full_seconds:.1f} s • "
+                    "baseline quality"
+                )
+            self.processing_plan.setText(text)
+            return
+
+        break_even = tiled_runtime_break_even(triangle_count, algorithm, index_ready)
+        if break_even is None:
+            self.processing_plan.setText(
+                f"{route.title()} • {workers} workers • time and quality estimate unavailable"
+            )
+            return
+        full_seconds, tiled_seconds, setup_seconds = break_even
+        use_tiled = route == "tiled" or (
+            route == "auto" and self.auto_tiling_enabled and tiled_seconds < full_seconds
+        )
+        if use_tiled:
+            setup_text = "cached index" if setup_seconds == 0 else f"{setup_seconds:.1f} s setup"
+            self.processing_plan.setText(
+                f"Tiled • {workers} workers • est. {tiled_seconds:.1f} s ({setup_text}) • "
+                "avg error +6% • peak error +4%"
+            )
+        else:
+            route_label = "Auto → full mesh" if route == "auto" else "Full mesh"
+            self.processing_plan.setText(
+                f"{route_label} • single mesh • est. {full_seconds:.1f} s • baseline quality"
+            )
 
     def _apply_smart_target(self, _checked=False) -> None:
         if self.source_points is None or self.source_faces is None:
@@ -5952,27 +8398,30 @@ class MainWindow(QMainWindow):
         target = smart_target(
             self.source_points, self.source_faces, self.smart_quality.currentText()
         )
+        if self.tiled_mode:
+            target = round(target / max(1, len(self.source_faces)) * self.overview_total_triangles)
         self.preview_dirty = True
         self._set_primary_action(False, not self.busy)
         self.target.setValue(target)
         self._update_estimated_size()
 
     def _algorithm_changed(self, _algorithm: str) -> None:
-        if _algorithm == DEPTH_ADAPTIVE_LABEL and not gpu_backend_supported(self.gpu_preference):
+        if is_gpu_guided_algorithm(_algorithm) and not gpu_backend_supported(self.gpu_preference):
             message = QMessageBox(self)
-            message.setWindowTitle("Depth Adaptive QEM")
+            message.setWindowTitle("GPU-guided optimization")
             message.setIcon(QMessageBox.Icon.Information)
-            message.setText("Depth Adaptive QEM is unavailable on this system.")
+            message.setText("This GPU-guided algorithm is unavailable on this system.")
             message.setInformativeText(
                 "Its runtime is included with MeshMill, but the algorithm requires a compatible "
-                "NVIDIA GPU and driver. Fast QEM and the other built-in algorithms remain "
-                "available."
+                "NVIDIA GPU and driver. MeshMill will use Density balanced instead."
             )
             message.addButton(QMessageBox.StandardButton.Ok)
             message.exec()
             with QSignalBlocker(self.algorithm):
-                self.algorithm.setCurrentText("Fast QEM")
-            _algorithm = "Fast QEM"
+                self.algorithm.setCurrentText("Density balanced")
+            _algorithm = "Density balanced"
+        self.last_algorithm = _algorithm
+        self.settings.setValue("optimization/last_algorithm", _algorithm)
         if self.source_faces is None:
             return
         if self.crop_candidate is not None or (
@@ -5989,12 +8438,15 @@ class MainWindow(QMainWindow):
             self.preview_poly is not None and self.preview_poly is not self.source_poly
         )
         self._update_estimated_size()
+        self._update_processing_plan()
 
     def _slider_changed(self, value: int) -> None:
         if self.source_faces is None:
             return
         selection_total = self._selected_triangle_count()
-        total = selection_total or len(self.source_faces)
+        total = selection_total or (
+            self.overview_total_triangles if self.tiled_mode else len(self.source_faces)
+        )
         minimum = min(1_000, max(4, total - 1))
         low = math.log10(minimum)
         high = math.log10(max(minimum + 1, total))
@@ -6018,7 +8470,9 @@ class MainWindow(QMainWindow):
     def _sync_slider_from_target(self, selection_total: int | None = None) -> None:
         if self.source_faces is None:
             return
-        total = selection_total or len(self.source_faces)
+        total = selection_total or (
+            self.overview_total_triangles if self.tiled_mode else len(self.source_faces)
+        )
         minimum = min(1_000, max(4, total - 1))
         low = math.log10(minimum)
         high = math.log10(max(minimum + 1, total))
@@ -6028,6 +8482,9 @@ class MainWindow(QMainWindow):
 
     def preview(self) -> None:
         if self.source_points is None or self.source_faces is None:
+            return
+        if self.tiled_mode:
+            self._preview_tiled()
             return
         if self._selected_triangle_count():
             self.timer.stop()
@@ -6070,7 +8527,7 @@ class MainWindow(QMainWindow):
             "Optimizing",
             (
                 depth_adaptive_progress_text(self.gpu_preference)
-                if algorithm.startswith("Depth Adaptive QEM")
+                if is_gpu_guided_algorithm(algorithm)
                 else (
                     f"Optimizing {fmt_count(len(self.source_faces))} triangles to about "
                     f"{fmt_count(target)}"
@@ -6081,14 +8538,28 @@ class MainWindow(QMainWindow):
         self.save_button.setEnabled(self.mesh_modified)
         self.status.setText(
             depth_adaptive_progress_text(self.gpu_preference) + "…"
-            if algorithm.startswith("Depth Adaptive QEM")
+            if is_gpu_guided_algorithm(algorithm)
             else f"Optimizing to about {fmt_count(target)} triangles…"
         )
         points = self.source_points
         faces = self.source_faces
+        progress_path = self._start_operation_progress(
+            generation,
+            "Analyzing depth and density on GPU"
+            if algorithm == DEPTH_DENSITY_ADAPTIVE_LABEL
+            else "Analyzing surface on GPU"
+            if is_gpu_guided_algorithm(algorithm)
+            else "Reducing mesh topology",
+        )
         self.operation_uses_process = True
         future = self.optimization_executor.submit(
-            simplify_process_job, points, faces, target, algorithm, self.gpu_preference
+            simplify_process_job,
+            points,
+            faces,
+            target,
+            algorithm,
+            self.gpu_preference,
+            progress_path,
         )
         self.operation_future = future
 
@@ -6098,6 +8569,86 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001 - Future may surface any worker exception type
                 result = (None, None, None, traceback.format_exc())
             self.bridge.done.emit(generation, *result)
+
+        future.add_done_callback(completed)
+
+    def _preview_tiled(self) -> None:
+        if (
+            self.tiled_index_directory is None
+            or self.source_points is None
+            or self.source_faces is None
+            or self.busy
+        ):
+            return
+        target = min(self.target.value(), self.overview_total_triangles)
+        self.generation += 1
+        generation = self.generation
+        self.running_target = target
+        token = self._begin_mesh_operation(
+            "Optimizing tiles",
+            f"{fmt_count(self.overview_total_triangles)} triangles to about {fmt_count(target)}",
+        )
+        progress_path = self._start_operation_progress(token, "Optimizing tiles")
+        output_path = self.tiled_index_directory / "optimized-preview.stl"
+        source_points = self.source_points.copy()
+        source_faces = self.source_faces.copy()
+        cancel_event = self.operation_cancel_event
+
+        def job():
+            try:
+                def progress(stage: str, completed: int, total: int) -> None:
+                    labels = {
+                        "optimizing tiles": "Optimizing tiles",
+                        "assembling": "Assembling optimized mesh",
+                    }
+                    _write_process_progress(
+                        progress_path,
+                        labels.get(stage, stage.capitalize()),
+                        completed,
+                        total,
+                    )
+
+                optimize_indexed_mesh(
+                    self.tiled_index_directory,
+                    output_path,
+                    target,
+                    aggressiveness=7.0,
+                    algorithm=self.algorithm.currentText(),
+                    gpu_preference=self.gpu_preference,
+                    workers=self.geometry_processes or None,
+                    memory_budget_bytes=max(
+                        64 * 1024**2,
+                        round(
+                            available_physical_memory()
+                            * self.large_mesh_memory_percent
+                            / 100.0
+                        ),
+                    ),
+                    cancel_event=cancel_event,
+                    progress_callback=progress,
+                )
+                _write_process_progress(progress_path, "Loading optimized mesh", 0, 1)
+                _poly, points, faces = load_stl(output_path)
+                metrics = mesh_quality_metrics(
+                    source_points,
+                    source_faces,
+                    points,
+                    faces,
+                    progress=lambda stage, completed, total: _write_process_progress(
+                        progress_path, stage, completed, total
+                    ),
+                    cancel_event=cancel_event,
+                )
+                _write_process_progress(progress_path, "Loading optimized mesh", 1, 1)
+                return points, faces, metrics, None
+            except Exception:  # noqa: BLE001 - worker boundary returns diagnostics to the UI
+                return None, None, None, traceback.format_exc()
+
+        future = self.executor.submit(job)
+        self.operation_future = future
+
+        def completed(result_future) -> None:
+            self.bridge.done.emit(generation, *result_future.result())
 
         future.add_done_callback(completed)
 
@@ -6138,7 +8689,12 @@ class MainWindow(QMainWindow):
             if self.verification_screenshot is not None:
                 capture_path = self.verification_screenshot
                 self.verification_screenshot = None
-                QTimer.singleShot(750, lambda: self._capture_and_exit(capture_path))
+                if getattr(self, "verification_selection", False):
+                    QTimer.singleShot(750, lambda: self._capture_selection_and_exit(capture_path))
+                elif getattr(self, "verification_loupe", False):
+                    QTimer.singleShot(750, lambda: self._capture_loupe_and_exit(capture_path))
+                else:
+                    QTimer.singleShot(750, lambda: self._capture_and_exit(capture_path))
         if self.pending_target is not None:
             self.pending_target = None
             self.preview_dirty = True
@@ -6164,10 +8720,6 @@ class MainWindow(QMainWindow):
     ) -> None:
         if not hasattr(self, "quality_metric_labels"):
             return
-        if hasattr(self, "quality_metrics_state"):
-            self.quality_metrics_state.setText(
-                "Measured quality" if measured else "Quality estimate"
-            )
         abbreviations = {
             "rms_percent": "RMS",
             "p95_percent": "P95",
@@ -6183,21 +8735,18 @@ class MainWindow(QMainWindow):
         for key, label in self.quality_metric_labels.items():
             if not metrics or key not in metrics:
                 label.setText(f"{abbreviations[key]}\n—")
-                label.setStyleSheet(
-                    "color: #0B1B34; background: #FFFFFF; border: 1px solid #D8DCE5; "
-                    "border-radius: 4px; padding: 3px 1px; font-size: 9px; font-weight: 600;"
-                )
+                label.setProperty("qualityState", "")
+                label.style().unpolish(label)
+                label.style().polish(label)
                 continue
             value = float(metrics[key])
             good, caution = thresholds[key]
-            color = (
-                "#16794A" if value <= good else "#9A6700" if value <= caution else "#B42318"
-            )
             label.setText(f"{abbreviations[key]}\n{value:.2f}%")
-            label.setStyleSheet(
-                f"color: #0B1B34; background: #FFFFFF; border: 2px solid {color}; "
-                "border-radius: 4px; padding: 2px 1px; font-size: 9px; font-weight: 600;"
+            label.setProperty(
+                "qualityState", "good" if value <= good else "caution" if value <= caution else "warning"
             )
+            label.style().unpolish(label)
+            label.style().polish(label)
 
     def _update_save_button_label(self) -> None:
         label = "Save current mesh"
@@ -6227,13 +8776,15 @@ class MainWindow(QMainWindow):
             self.preview_vertices.setText("—")
             self.estimated_file_size.setText("—")
             return
-        if self.overview_mode:
+        if self.overview_mode and not self.tiled_mode:
             self.preview_count.setText("—")
             self.preview_vertices.setText("—")
             self.optimization_ratio.setText("—")
             self.estimated_file_size.setText("—")
             return
-        working_triangles = len(self.source_faces)
+        working_triangles = (
+            self.overview_total_triangles if self.tiled_mode else len(self.source_faces)
+        )
         selected_triangles = self._selected_triangle_count()
         requested = self.selection_target if selected_triangles else self.target.value()
         target = min(
@@ -6246,10 +8797,7 @@ class MainWindow(QMainWindow):
             else target
         )
         vertex_ratio = len(self.source_points) / max(1, working_triangles)
-        estimated_vertices = min(
-            len(self.source_points),
-            max(4, round(estimated_triangles * vertex_ratio)),
-        )
+        estimated_vertices = max(4, round(estimated_triangles * vertex_ratio))
         self.preview_count.setText(f"~{fmt_count(estimated_triangles)}")
         self.preview_vertices.setText(f"~{fmt_count(estimated_vertices)}")
         self.target_display.setText(fmt_count(target))
@@ -6331,10 +8879,9 @@ class MainWindow(QMainWindow):
         )
         self.save_button.setEnabled(self.mesh_modified)
         self._show_poly(self.source_poly, reset_camera=False)
-        if was_selection_preview and self._selected_triangle_count():
-            self._show_selection_primary_action()
-            self._refresh_persistent_selection()
-            self.status.setText("Selection optimization cancelled â€¢ selection retained")
+        if was_selection_preview:
+            self._clear_selection(message=None)
+            self.status.setText("Selection optimization cancelled • selection cleared")
         else:
             self.status.setText("Optimization cancelled")
 
@@ -6350,6 +8897,16 @@ class MainWindow(QMainWindow):
         applied_poly = self.preview_poly
         applied_actor = self.simplified_actor
         selection_pass = self.preview_is_selection
+        script_pass = None
+        if not selection_pass:
+            algorithm = self.algorithm.currentText()
+            script_pass = {
+                "algorithm": CLI_ALGORITHM_KEYS.get(algorithm, "auto"),
+                "target": int(self.target.value()),
+                "aggressiveness": 7.0,
+                "gpu": self.gpu_preference,
+                "quality": self.smart_quality.currentText(),
+            }
         if selection_pass:
             self.preview_poly = None
             self.simplified_actor = None
@@ -6362,7 +8919,75 @@ class MainWindow(QMainWindow):
             preserve_target=selection_pass,
             cached_actor=applied_actor,
             committed_optimization=True,
+            script_pass=script_pass,
+            script_omission="Selection optimization" if selection_pass else None,
         )
+
+    def _generate_optimization_script(self, _checked=False) -> None:
+        if self.source_path is None or not self.optimization_script_passes:
+            return
+        generated = render_optimization_script(
+            self.source_path,
+            self.optimization_script_passes,
+            self.optimization_script_omissions,
+        )
+        suggested = self.source_path.with_name(f"{self.source_path.stem}_meshmill_passes.ps1")
+        script_dialog = QDialog(self)
+        script_dialog.setWindowTitle("PowerShell script")
+        script_dialog.resize(max(760, self.width() * 2 // 3), max(520, self.height() * 2 // 3))
+        layout = QVBoxLayout(script_dialog)
+        editor = QPlainTextEdit(script_dialog)
+        editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        editor.setPlainText(generated)
+        editor.setToolTip("Edit the commands before copying or saving the script.")
+        layout.addWidget(editor, 1)
+
+        actions = QHBoxLayout()
+        copy_button = QPushButton("Copy", script_dialog)
+        reset_button = QPushButton("Reset", script_dialog)
+        save_button = QPushButton("Save As…", script_dialog)
+        actions.addWidget(copy_button)
+        actions.addWidget(reset_button)
+        actions.addStretch(1)
+        actions.addWidget(save_button)
+        close_button = QPushButton("Close", script_dialog)
+        actions.addWidget(close_button)
+        layout.addLayout(actions)
+
+        copy_button.clicked.connect(lambda: QApplication.clipboard().setText(editor.toPlainText()))
+        reset_button.clicked.connect(lambda: editor.setPlainText(generated))
+
+        def save_script() -> None:
+            path, _ = QFileDialog.getSaveFileName(
+                script_dialog,
+                "Save PowerShell script",
+                os.fspath(suggested),
+                "PowerShell script (*.ps1)",
+            )
+            if not path:
+                return
+            destination = Path(path)
+            if destination.suffix.lower() != ".ps1":
+                destination = destination.with_suffix(".ps1")
+            try:
+                destination.write_text(editor.toPlainText(), encoding="utf-8", newline="\r\n")
+            except OSError as exc:
+                QMessageBox.critical(
+                    script_dialog,
+                    APP_NAME,
+                    "Could not save the PowerShell script.\n\n" + str(exc),
+                )
+                return
+            self.status.setText(f"PowerShell script saved: {destination}")
+
+        save_button.clicked.connect(save_script)
+        close_button.clicked.connect(script_dialog.accept)
+        center = self.geometry().center()
+        script_dialog.move(
+            center.x() - script_dialog.width() // 2,
+            center.y() - script_dialog.height() // 2,
+        )
+        script_dialog.exec()
 
     def _toggle_mesh(self) -> None:
         if self.source_poly is None or self.preview_poly is None:
@@ -6428,6 +9053,19 @@ class MainWindow(QMainWindow):
         self.previous_mesh_button.setEnabled(current is not previous and not self.busy)
 
     def _capture_and_exit(self, path: Path) -> None:
+        # Verification images document the settled application state. Density coloring runs in a
+        # separate worker, so wait for it instead of capturing the progress panel.
+        if self.busy:
+            QTimer.singleShot(250, lambda: self._capture_and_exit(path))
+            return
+        if self._display_mode() == "Density":
+            density_poly, _points, _faces = self._active_density_mesh()
+            if density_poly is not None and id(density_poly) not in self.density_cache:
+                self._request_density_analysis(density_poly)
+                QTimer.singleShot(250, lambda: self._capture_and_exit(path))
+                return
+            if density_poly is not None:
+                self._show_poly(density_poly, reset_camera=False)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.vtk_widget.GetRenderWindow().Render()
         capture = vtkWindowToImageFilter()
@@ -6480,6 +9118,32 @@ class MainWindow(QMainWindow):
             return
         QApplication.instance().quit()
 
+    def _capture_selection_and_exit(self, path: Path) -> None:
+        """Build a stable retained-selection state for release verification images."""
+        if self.source_poly is None:
+            self._capture_and_exit(path)
+            return
+        self._show_poly(self.source_poly, reset_camera=False)
+        self.showing_original = True
+        width = max(1, self.vtk_widget.width())
+        height = max(1, self.vtk_widget.height())
+        self.crop_points = [
+            QPoint(round(width * 0.46), round(height * 0.30)),
+            QPoint(round(width * 0.70), round(height * 0.30)),
+            QPoint(round(width * 0.70), round(height * 0.67)),
+            QPoint(round(width * 0.46), round(height * 0.67)),
+        ]
+        self._prepare_polygon_crop()
+        QTimer.singleShot(250, lambda: self._capture_and_exit(path))
+
+    def _capture_loupe_and_exit(self, path: Path) -> None:
+        """Show the pointer magnifier in a deterministic position for release images."""
+        interactor = self.vtk_widget.GetRenderWindow().GetInteractor()
+        width, height = self.vtk_widget.GetRenderWindow().GetSize()
+        interactor.SetEventInformation(max(1, width // 2), max(1, height // 2), 0, 0, "0", 0, None)
+        self._show_loupe(True)
+        QTimer.singleShot(250, lambda: self._capture_and_exit(path))
+
     def _show_poly(self, poly: vtkPolyData, reset_camera: bool = True) -> None:
         if poly is self.source_poly and self.source_actor is not None:
             actor = self.source_actor
@@ -6512,7 +9176,7 @@ class MainWindow(QMainWindow):
             and id(poly) not in self.density_cache
         ):
             self.pending_density_poly = poly
-            self.density_legend.setVisible(True)
+            self.density_legend.setVisible(self._overlay_is_visible("density"))
             self.density_legend.raise_()
             self.renderer.RemoveAllViewProps()
             self.preview_actor = None
@@ -6550,7 +9214,7 @@ class MainWindow(QMainWindow):
             self.resident_vertex_buffers[id(actor)] = resident
         else:
             self.resident_vertex_buffers.pop(id(actor), None)
-        density_visible = self._display_mode() == "Density"
+        density_visible = self._display_mode() == "Density" and self._overlay_is_visible("density")
         self.density_legend.setVisible(density_visible)
         if density_visible:
             self.density_legend.raise_()
@@ -6660,10 +9324,12 @@ class MainWindow(QMainWindow):
                     mapper.Update()
                     render_poly = mapper.GetInput()
                 point_data = render_poly.GetPointData()
-                if point_data.GetArray("PointDensityColors") is None:
-                    vtk_colors = numpy_to_vtk(colors, deep=True)
-                    vtk_colors.SetName("PointDensityColors")
-                    point_data.AddArray(vtk_colors)
+                # Theme changes produce a fresh palette for the same mesh. Replace the
+                # existing VTK array rather than leaving the first palette attached.
+                point_data.RemoveArray("PointDensityColors")
+                vtk_colors = numpy_to_vtk(colors, deep=True)
+                vtk_colors.SetName("PointDensityColors")
+                point_data.AddArray(vtk_colors)
                 point_data.SetActiveScalars("PointDensityColors")
                 mapper.SetScalarModeToUsePointFieldData()
                 mapper.SelectColorArray("PointDensityColors")
@@ -6713,10 +9379,33 @@ class MainWindow(QMainWindow):
             f"Mapping {fmt_count(len(points))} vertices across {fmt_count(len(faces))} triangles",
         )
         cancel_event = self.operation_cancel_event
+        viewport_color = QColor(self._viewport_theme()["viewport"])
+        density_base = (
+            viewport_color.red(), viewport_color.green(), viewport_color.blue()
+        )
+        custom_gradient = self._custom_density_colors()
+        if custom_gradient is not None:
+            density_base, density_dense = custom_gradient
+        else:
+            density_dense = None
+        progress_path = self._start_operation_progress(token, "Measuring triangle density")
+        _write_process_progress(progress_path, "Measuring triangle density", 0, len(faces))
 
         def job():
             try:
-                return point_density_colors(points, faces, cancel_event), None
+                return (
+                    point_density_colors(
+                        points,
+                        faces,
+                        cancel_event,
+                        progress=lambda stage, completed, total: _write_process_progress(
+                            progress_path, stage, completed, total
+                        ),
+                        base_color=density_base,
+                        dense_color=density_dense,
+                    ),
+                    None,
+                )
             except OperationCancelled:
                 return None, "cancelled"
             except Exception:  # noqa: BLE001 - worker boundary reports failures through the result payload
@@ -6741,11 +9430,11 @@ class MainWindow(QMainWindow):
             requested = self.pending_density_poly
             if requested is not None and id(requested) == poly_key:
                 self._show_poly(requested, reset_camera=False)
-            self.status.setText("Point density ready")
+            self.status.setText("Ready")
 
     def _apply_display_mode(self, mode: str) -> None:
         self.settings.setValue("display/type", mode)
-        self.density_legend.setVisible(mode == "Density")
+        self.density_legend.setVisible(mode == "Density" and self._overlay_is_visible("density"))
         if mode == "Density":
             self.density_legend.raise_()
             poly, _points, _faces = self._active_density_mesh()
@@ -6927,21 +9616,290 @@ class MainWindow(QMainWindow):
             return
         QApplication.quit()
 
-    def _show_about(self) -> None:
-        dialog = QMessageBox(self)
-        dialog.setWindowTitle(f"About {APP_NAME}")
-        dialog.setIconPixmap(self.windowIcon().pixmap(64, 64))
-        dialog.setTextFormat(Qt.TextFormat.RichText)
-        dialog.setText(
-            f"<b>{APP_NAME} {APP_VERSION}</b><br><br>"
-            "STL mesh inspection, selection, and optimization.<br><br>"
-            f'<a href="{REPOSITORY_URL}">GitHub repository</a><br>'
-            f'<a href="{BUG_REPORT_URL}">Report a bug</a><br>'
-            f'<a href="{FEATURE_REQUEST_URL}">Request a feature</a><br>'
-            f'<a href="{SUPPORT_URL}">Support MeshMill on Buy Me a Coffee</a><br><br>'
-            "GNU General Public License v3.0 or later."
+    def _anonymous_bug_diagnostics(self) -> str:
+        """Return reviewable diagnostics without paths, identifiers, or raw settings."""
+        loaded_triangles = (
+            self.overview_total_triangles
+            if self.tiled_mode
+            else len(self.source_faces)
+            if self.source_faces is not None
+            else 0
         )
-        dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        gpu_selection = "Automatic" if self.gpu_preference == "system" else "Manually selected"
+        geometry_workers = "Automatic" if self.geometry_processes == 0 else str(self.geometry_processes)
+        installation = "Packaged application" if getattr(sys, "frozen", False) else "Python source run"
+        cpu_model = platform.processor().strip() or os.environ.get("PROCESSOR_IDENTIFIER", "Unknown")
+        selected_gpu = next(
+            (
+                device
+                for device in self.cuda_device_list
+                if device["pci_bus_id"] == self.gpu_preference
+            ),
+            None,
+        )
+        if selected_gpu is not None:
+            gpu_model = str(selected_gpu["name"])
+            gpu_memory = fmt_bytes(int(selected_gpu["total_memory"]))
+        elif len(self.cuda_device_list) == 1:
+            gpu_model = str(self.cuda_device_list[0]["name"])
+            gpu_memory = fmt_bytes(int(self.cuda_device_list[0]["total_memory"]))
+        elif self.cuda_device_list:
+            gpu_model = ", ".join(str(device["name"]) for device in self.cuda_device_list)
+            gpu_memory = "Automatic selection"
+        else:
+            gpu_model = "No CUDA GPU detected"
+            gpu_memory = "Not available"
+
+        lines = [
+            f"MeshMill version: {APP_VERSION}",
+            f"Installation: {installation}",
+            f"Operating system: {platform.system()}",
+            f"CPU model: {cpu_model}",
+            f"Logical processors: {os.cpu_count() or 'Unknown'}",
+            f"GPU-guided algorithms available: {'Yes' if gpu_backend_supported(self.gpu_preference) else 'No'}",
+            f"GPU selection: {gpu_selection}",
+            f"GPU model: {gpu_model}",
+            f"GPU memory: {gpu_memory}",
+            f"Algorithm: {self.algorithm.currentText()}",
+            f"Smart quality: {self.smart_quality.currentText()}",
+            f"Display mode: {self._display_mode()}",
+            f"Model units: {self.units.currentText()}",
+            f"Large-mesh mode: {self.large_mesh_mode}",
+            f"Geometry workers: {geometry_workers}",
+            f"Memory budget: {self.large_mesh_memory_percent}%",
+            f"Model loaded: {'Yes' if self.source_faces is not None else 'No'}",
+            f"Loaded triangles: {loaded_triangles:,}" if loaded_triangles else "Loaded triangles: none",
+        ]
+        if self.last_operation_runtime:
+            runtime_total = sum(self.last_operation_runtime.values())
+            runtime_parts = []
+            for name in (
+                "Preparation",
+                "Reading and indexing",
+                "Surface analysis",
+                "Mesh reduction",
+                "Result checks",
+                "Output assembly",
+            ):
+                seconds = self.last_operation_runtime.get(name, 0.0)
+                if seconds <= 0.005:
+                    continue
+                percentage = round(100.0 * seconds / runtime_total) if runtime_total else 0
+                runtime_parts.append(f"{name} {percentage}% ({seconds:.1f} s)")
+            if runtime_parts:
+                lines.append(
+                    f"Last operation runtime: {self.last_operation_name} {runtime_total:.1f} s"
+                )
+                lines.append("Runtime breakdown: " + "; ".join(runtime_parts))
+        if self.runtime_operation_count:
+            aggregate_parts = []
+            for name in self._runtime_category_order():
+                seconds = self.runtime_aggregate_seconds.get(name, 0.0)
+                count = self.runtime_aggregate_counts.get(name, 0)
+                if seconds > 0.005:
+                    aggregate_parts.append(f"{name} {count}x ({seconds:.1f} s)")
+            lines.append(
+                f"Runtime session: {self.runtime_operation_count} completed operations, "
+                f"{self.runtime_total_seconds:.1f} s total"
+            )
+            if aggregate_parts:
+                lines.append("Runtime aggregates: " + "; ".join(aggregate_parts))
+        if self.source_points is not None:
+            lines.append(f"Loaded vertices: {len(self.source_points):,}")
+        if self.source_poly is not None:
+            divisor = UNIT_MM[self.units.currentText()]
+            size = np.asarray(bounds_size(self.source_poly.GetBounds())) / divisor
+            lines.append(f"Model dimensions: {fmt_size(tuple(size))} {self.units.currentText()}")
+        return "\n".join(lines)
+
+    def _show_bug_report_dialog(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Report a bug")
+        dialog.setModal(True)
+        dialog.resize(620, 590)
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            "Describe the problem below. Create opens a prefilled GitHub issue for final review and submission.",
+            dialog,
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        title_label = QLabel("Title", dialog)
+        title = QLineEdit(dialog)
+        title.setPlaceholderText("Short description of the problem")
+        title.setMaxLength(160)
+        layout.addWidget(title_label)
+        layout.addWidget(title)
+
+        details_label = QLabel("What happened", dialog)
+        details = QPlainTextEdit(dialog)
+        details.setPlaceholderText(
+            "What were you doing? What did you expect? What happened instead?"
+        )
+        details.setMinimumHeight(145)
+        layout.addWidget(details_label)
+        layout.addWidget(details, 1)
+
+        include_diagnostics = QCheckBox("Include anonymous diagnostics", dialog)
+        include_diagnostics.setToolTip(
+            "Includes MeshMill version, broad operating-system information, capability status, "
+            "and selected MeshMill options. It excludes paths, usernames, device names, hardware "
+            "identifiers, driver details, and raw settings files."
+        )
+        layout.addWidget(include_diagnostics)
+
+        diagnostics = QPlainTextEdit(dialog)
+        diagnostics.setPlainText(self._anonymous_bug_diagnostics())
+        diagnostics.setMinimumHeight(145)
+        diagnostics.setEnabled(False)
+        diagnostics.setToolTip(
+            "Review and edit this text before creating the GitHub issue.")
+        layout.addWidget(diagnostics)
+
+        privacy_note = QLabel(
+            "Diagnostics are optional and editable. File paths, account information, and hardware "
+            "identifiers are not collected.",
+            dialog,
+        )
+        privacy_note.setWordWrap(True)
+        privacy_note.setStyleSheet("color: #5E6B80;")
+        layout.addWidget(privacy_note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        create_button = buttons.addButton("Create GitHub issue", QDialogButtonBox.ButtonRole.AcceptRole)
+        create_button.setProperty("accent", True)
+        layout.addWidget(buttons)
+
+        include_diagnostics.toggled.connect(diagnostics.setEnabled)
+
+        def create_issue() -> None:
+            report_details = details.toPlainText().strip()
+            if not report_details:
+                QMessageBox.information(dialog, APP_NAME, "Describe the problem before creating the issue.")
+                return
+            QDesktopServices.openUrl(
+                QUrl(
+                    build_bug_report_url(
+                        title.text(),
+                        report_details,
+                        diagnostics.toPlainText() if include_diagnostics.isChecked() else None,
+                    )
+                )
+            )
+            dialog.accept()
+
+        buttons.rejected.connect(dialog.reject)
+        create_button.clicked.connect(create_issue)
+        dialog.exec()
+
+    def _show_about(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"About {APP_NAME}")
+        dialog.setMinimumWidth(390)
+
+        layout = QVBoxLayout(dialog)
+        heading = QHBoxLayout()
+        icon = QLabel(dialog)
+        icon.setPixmap(self.windowIcon().pixmap(52, 52))
+        heading.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
+
+        title_layout = QVBoxLayout()
+        title = QLabel(f"{APP_NAME} {APP_VERSION}", dialog)
+        title.setObjectName("aboutTitle")
+        title_layout.addWidget(title)
+        description = QLabel("STL mesh inspection, selection, and optimization.", dialog)
+        description.setWordWrap(True)
+        title_layout.addWidget(description)
+        heading.addLayout(title_layout, 1)
+        layout.addLayout(heading)
+
+        changes_row = QHBoxLayout()
+        version_changes = QPushButton(f"What’s new in {APP_VERSION}", dialog)
+        all_changes = QPushButton("All changes", dialog)
+        changes_row.addWidget(version_changes)
+        changes_row.addWidget(all_changes)
+        layout.addLayout(changes_row)
+
+        action_row = QHBoxLayout()
+        report_bug = QPushButton("Report a bug", dialog)
+        request_feature = QPushButton("Request a feature", dialog)
+        action_row.addWidget(report_bug)
+        action_row.addWidget(request_feature)
+        layout.addLayout(action_row)
+
+        support = QPushButton("Support MeshMill", dialog)
+        support.setProperty("support", True)
+        support.setIcon(QIcon(os.fspath(resource_path("assets/support-profile.webp"))))
+        support.setIconSize(QSize(26, 26))
+        layout.addWidget(support)
+
+        license_label = QLabel("GNU General Public License v3.0 or later.", dialog)
+        license_label.setProperty("muted", True)
+        layout.addWidget(license_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dialog)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def changelog_text(current_only: bool) -> str:
+            try:
+                text = resource_path("CHANGELOG.md").read_text(encoding="utf-8")
+            except OSError:
+                return "Changelog is unavailable in this build."
+            if not current_only:
+                return text
+            heading_text = f"## {APP_VERSION}"
+            start = text.find(heading_text)
+            if start < 0:
+                return text
+            end = text.find("\n## ", start + len(heading_text))
+            return text[start:] if end < 0 else text[start:end]
+
+        def show_changelog(current_only: bool) -> None:
+            changelog = QDialog(dialog)
+            changelog.setWindowTitle(
+                f"What’s new in {APP_VERSION}" if current_only else "Changelog"
+            )
+            screen = self.screen() or QApplication.primaryScreen()
+            available = screen.availableGeometry()
+            changelog.resize(
+                min(
+                    max(520, available.width() - 64),
+                    min(1120, max(860, round(available.width() * 0.72))),
+                ),
+                min(
+                    max(420, available.height() - 64),
+                    min(820, max(620, round(available.height() * 0.76))),
+                ),
+            )
+            changelog_layout = QVBoxLayout(changelog)
+            viewer = QTextBrowser(changelog)
+            viewer.setReadOnly(True)
+            viewer.setOpenExternalLinks(True)
+            viewer.setMarkdown(changelog_text(current_only))
+            changelog_layout.addWidget(viewer)
+            close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=changelog)
+            close.rejected.connect(changelog.reject)
+            changelog_layout.addWidget(close)
+            center = available.center()
+            changelog.move(center.x() - changelog.width() // 2, center.y() - changelog.height() // 2)
+            changelog.exec()
+
+        version_changes.clicked.connect(lambda: show_changelog(True))
+        all_changes.clicked.connect(lambda: show_changelog(False))
+
+        def open_bug_report() -> None:
+            dialog.accept()
+            self._show_bug_report_dialog()
+
+        report_bug.clicked.connect(open_bug_report)
+        request_feature.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(FEATURE_REQUEST_URL))
+        )
+        support.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(SUPPORT_URL)))
         dialog.exec()
 
     def _open_repository(self) -> None:
@@ -6982,6 +9940,9 @@ def main() -> int:
     verify_parser = argparse.ArgumentParser(add_help=False)
     verify_parser.add_argument("--verification-screenshot", type=Path)
     verify_parser.add_argument("--verification-target", type=int, default=200_000)
+    verify_parser.add_argument("--verification-display", choices=DISPLAY_MODES)
+    verify_parser.add_argument("--verification-selection", action="store_true")
+    verify_parser.add_argument("--verification-loupe", action="store_true")
     verify_parser.add_argument("--diagnostic-log", type=Path)
     verify_args, qt_args = verify_parser.parse_known_args(sys.argv[1:])
     app = QApplication([sys.argv[0], *qt_args])
@@ -7002,13 +9963,26 @@ def main() -> int:
         window._diagnostic("session_start", argv=sys.argv[1:])
     window.verification_screenshot = verify_args.verification_screenshot
     window.verification_target = verify_args.verification_target
+    window.verification_selection = verify_args.verification_selection
+    window.verification_loupe = verify_args.verification_loupe
     window.showMaximized()
     # The Windows frame and the embedded native VTK window settle in separate
     # event-loop passes during startup. Refresh against the final client area.
     window._schedule_viewport_layout_refresh()
+    def settle_startup_window() -> None:
+        if not window.isMaximized():
+            window.showMaximized()
+        window._schedule_viewport_layout_refresh()
+
+    for delay in (250, 1000, 2500):
+        QTimer.singleShot(delay, settle_startup_window)
     paths = [arg for arg in qt_args if not arg.startswith("-")]
     if paths:
         def load_initial() -> None:
+            if verify_args.verification_display:
+                display_index = window.display_type.findData(verify_args.verification_display)
+                if display_index >= 0:
+                    window.display_type.setCurrentIndex(display_index)
             window.load_path(Path(paths[0]))
         QTimer.singleShot(0, load_initial)
     return app.exec()

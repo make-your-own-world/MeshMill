@@ -1,0 +1,18 @@
+{
+  "before": {
+    "reduction_percent": 97.57655438326933,
+    "rms_percent": 0.15851492510176554,
+    "p95_percent": 0.2857286511963819,
+    "drift_percent": 0.011473853548563456,
+    "area_percent": 0.1852176965692287,
+    "nonmanifold_percent": 0.03200032000320003
+  },
+  "after": {
+    "reduction_percent": 97.57655438326933,
+    "rms_percent": 0.15851492701320297,
+    "p95_percent": 0.2857286511963819,
+    "drift_percent": 0.0,
+    "area_percent": 0.18527236732790442,
+    "nonmanifold_percent": 0.03200032000320003
+  }
+}

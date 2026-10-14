@@ -46,11 +46,11 @@ tools when reporting performance.
 Linux, after extracting the complete archive:
 
 ```bash
-./MeshMill/MeshMill --cli input.stl --preset balanced --output output.stl
+./MeshMill/MeshMillCLI input.stl --quality balanced --output output.stl
 ```
 
 macOS, after copying `MeshMill.app` to Applications:
 
 ```bash
-/Applications/MeshMill.app/Contents/MacOS/MeshMill --cli input.stl --preset balanced --output output.stl
+/Applications/MeshMill.app/Contents/MacOS/MeshMillCLI input.stl --quality balanced --output output.stl
 ```

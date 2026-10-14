@@ -126,8 +126,8 @@ general.
   a fast or accurate end-to-end QEM implementation.
 - Count connectivity construction, conflict processing, synchronization, target completion, surface
   error, boundary changes, and non-manifold changes when comparing CPU and GPU paths.
-- Retain Fast QEM as the default. Offer Depth Adaptive QEM where the GPU analysis backend is
-  available and its initialization cost is acceptable.
+- Select Depth + Density Adaptive QEM by default where the GPU analysis backend is available.
+  Select Density balanced otherwise. Keep Fast QEM as the lower-overhead manual option.
 
 ## Related project records
 

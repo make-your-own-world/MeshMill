@@ -8,6 +8,7 @@ a = Analysis(
     datas=[
         ('LICENSE', '.'),
         ('README.md', '.'),
+        ('CHANGELOG.md', '.'),
         ('ROADMAP.md', '.'),
         ('THIRD_PARTY_NOTICES.md', '.'),
         ('CUDA_EXCEPTION.md', '.'),
@@ -15,6 +16,7 @@ a = Analysis(
         ('docs/GPU_OUT_OF_CORE.md', 'docs'),
         ('assets/meshmill-mark.svg', 'assets'),
         ('assets/meshmill-logo.svg', 'assets'),
+        ('assets/support-profile.webp', 'assets'),
         ('locales/en-US.json', 'locales'),
     ],
     hiddenimports=[
