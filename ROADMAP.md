@@ -140,24 +140,27 @@ Planned validation and controls:
 - export a printable STL only after solid validation passes, with unresolved regions identified for
   review.
 
-## Distributed synthesis
+## Distributed tile processing
 
-A MeshMill cluster should coordinate multiple nodes operating in parallel across multiple
-workstations. A node may inspect, select, reduce, validate, repair, or combine an assigned region or
-work unit. Contributions remain independently versioned until they are reviewed and incorporated
-into a shared object version.
+The first distributed feature should extend the tested local tiled-processing contract to explicitly
+trusted MeshMill nodes on a local network. A desktop instance can host a job and another desktop
+instance can opt in as a worker. This is a processing feature, not a shared-project or collaboration
+system.
 
-The system should support:
+The first usable scope is deliberately narrow:
 
-- concurrent contributions from multiple operators and automated nodes;
-- deterministic work-unit inputs, parameters, dependencies, and outputs;
-- capability-aware scheduling based on CPU, GPU, memory, algorithms, and current load;
-- dependency-aware partitioning of meshes, regions, validation passes, and synthesis stages;
-- durable queues with pause, resume, cancellation, retry, reassignment, and failure recovery;
-- content-addressed artifacts and integrity checks between nodes;
-- reproducible synthesis from a recorded set of accepted contribution versions;
-- offline or intermittently connected workstations that can synchronize later;
-- local-first operation with explicit control over participating nodes and shared project data.
+- an in-app host creates the index, tile manifest, target allocation, and immutable job parameters;
+- an in-app worker reports supported MeshMill version, CPU, memory, GPU, and available capacity;
+- the host assigns complete tiles, with an explicit estimated transfer size, worker count, and ETA;
+- every worker returns a checksummed tile result and validation report;
+- the host alone validates, assembles, publishes, resumes, or cancels the final output;
+- local execution remains the default, with LAN work enabled only by an explicit user action;
+- workers are explicitly enrolled for a job. Discovery, public Internet access, and cloud dispatch
+  are outside the first milestone.
+
+The existing deterministic tile manifest, allocation, checksums, cancellation, resume, and assembly
+contracts are reusable. The missing work is the versioned transport protocol, enrollment and trust
+flow, artifact transfer, capability scheduling, reassignment, and failure handling.
 
 ## Versioned collaboration
 
@@ -215,25 +218,28 @@ Required coordination concepts:
 The index, streaming, cache, work-unit, and safety contract is documented in
 [`docs/OUT_OF_CORE.md`](docs/OUT_OF_CORE.md).
 
-- Estimate triangle count and working memory before allocating the complete mesh.
-- Open oversized binary STL files as bounded, evenly sampled navigation overviews.
-- Partition full-resolution geometry into spatial cubes with deterministic overlap boundaries.
-- Read, analyze, and optimize independent cubes concurrently within CPU and memory limits.
-- Continue GPU reduction research only from the measured baseline in
-  [`benchmarks/GPU_GEOMETRY_PROTOTYPE_RESULTS.md`](benchmarks/GPU_GEOMETRY_PROTOTYPE_RESULTS.md).
-  Depth Adaptive QEM is now a production GPU / Higher Quality option. Current voxel, clustering, topology-safe QEM,
-  parallel QEM, RXMesh, and exterior-cleanup paths
-  were rejected for speed, completeness, or quality. Integrate a future stage only when it improves
-  end-to-end time or memory while matching the CPU result's geometry and topology contract.
-- Prototype Depth and Density Adaptive QEM as a hybrid of the existing depth-probe analysis and
-  robust local-density statistics. Use density to allocate probe and triangle budgets, then use
-  depth agreement, curvature, and surface trajectory to distinguish useful detail from redundant
-  scan concentration. Compare it with Fast QEM, Density balanced, and Depth Adaptive QEM at matched
-  output counts before considering it for the application.
+- [x] Estimate triangle count and working memory before allocating the complete mesh.
+- [x] Open oversized binary STL files as bounded, evenly sampled navigation overviews.
+- [x] Partition full-resolution geometry into deterministic adaptive octree tiles.
+- [x] Read, analyze, and optimize independent tiles concurrently within CPU and memory limits.
+- [x] Assemble processed tiles with protected-boundary validation, atomic output, deterministic
+  ordering, and reproducible settings.
+- [x] Validate count preservation, connected-surface boundary edges, cancellation, resume, corrupt
+  checkpoint recovery, deterministic output, and sequential versus parallel performance in
+  [`docs/TILED_PROCESSING.md`](docs/TILED_PROCESSING.md).
+- [x] Prototype and validate Depth + Density Adaptive QEM as a hybrid of depth-probe analysis and
+  robust local-density statistics. It uses density, normal agreement, and surface trajectory to
+  distinguish useful detail from redundant scan concentration before global QEM assembly.
+- Continue GPU reduction research only when a candidate improves end-to-end time or memory while
+  matching the current geometry and topology contract. See
+  [`benchmarks/GPU_GEOMETRY_PROTOTYPE_RESULTS.md`](benchmarks/GPU_GEOMETRY_PROTOTYPE_RESULTS.md)
+  for the measured baseline.
 - Stream coarse-to-fine viewport levels instead of requiring the complete mesh in memory.
 - Draw cube state directly in the viewport: queued, reading, processing, completed, and failed.
 - Show per-cube progress by filling each cube and retain a high-level whole-object view.
-- Assemble processed cubes with boundary validation, duplicate removal, and reproducible settings.
+- Measure peak process-tree memory and GPU-guided tiled modes on multiple independent fixtures.
+- Replace conservative independent boundaries with a shared-boundary optimizer only if it improves
+  quality or retained count without weakening the existing seam and determinism contracts.
 - Extend the local cube scheduler into distributed synthesis work units in later phases.
 - Reuse resident viewport buffers through a native graphics-compute interoperability layer when the
   active system-default adapter supports it; retain validated CPU and staged-buffer fallbacks.
@@ -251,19 +257,21 @@ The index, streaming, cache, work-unit, and safety contract is documented in
 - Add visual mesh and region comparisons.
 - Make operations deterministic and independently reproducible.
 
-### Phase 2: coordinated local nodes
+### Phase 2: distributed tile-processing MVP
 
-- Run worker nodes on one workstation.
-- Add queueing, capability reporting, work assignment, and cancellation.
-- Display node and work-unit state in the MeshMill UI.
-- Validate partitioning and result assembly locally.
+- Add a versioned local-LAN protocol for existing deterministic tile manifests.
+- Add explicit worker enrollment, host/worker capability reporting, and per-job trust controls.
+- Transfer checksummed tile input and output artifacts with resume support.
+- Add capability-aware assignment, cancellation, reassignment, and recovery after worker loss.
+- Display participating workers, tile state, transfer size, ETA, and final assembly status in the
+  existing processing UI.
+- Validate byte-identical local-only and one-worker outputs before expanding to multiple workers.
 
 ### Phase 3: multi-workstation synthesis
 
-- Add authenticated LAN discovery and enrollment.
-- Transfer content-addressed work inputs and results with resume support.
-- Coordinate concurrent work across multiple workstations.
-- Recover assignments after node or network failure.
+- Coordinate concurrent tile work across multiple explicitly enrolled workstations.
+- Add bounded cloud-worker configuration only after local-LAN work is reliable and auditable.
+- Reuse the distributed tile contract for multi-STL alignment, comparison, merge, and synthesis.
 
 ### Phase 4: collaborative versioning
 

@@ -79,7 +79,7 @@ a scanner.
 | File | Triangles | Download | Best for |
 | --- | ---: | --- | --- |
 | Quick sample | 249,999 | [`sample-scan.stl`](samples/sample-scan.stl) | Learning the controls and quick evaluation |
-| Full source sample | 4,126,315 | [Download the full sample STL](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0/MeshMill-sample-scan-original.stl) | Dense geometry and large-mesh testing |
+| Full source sample | 4,126,315 | [Download the full sample STL](https://github.com/make-your-own-world/MeshMill/releases/download/v0.3.0/MeshMill-sample-scan-original.stl) | Dense geometry and large-mesh testing |
 
 The quick sample is included with the repository. The full source sample is also available through
 Git LFS for repository users. See [`samples/README.md`](samples/README.md) for provenance,

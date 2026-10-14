@@ -1,0 +1,162 @@
+{
+  "source_triangles": 4126315,
+  "source_vertices": 2070061,
+  "target_triangles": 250000,
+  "connectivity_seconds": 15.327688800010947,
+  "depth_analysis": {
+    "backend": "CUDA",
+    "device_id": 0,
+    "device_preference": "system",
+    "seconds": 1.0215977000043495,
+    "probe_geometry": {
+      "diameter": 0.4512670934200287,
+      "tip_radius": 0.22563354671001434,
+      "minimum_pitch": 2.055344995894128,
+      "maximum_pitch": 16.442759967153023,
+      "displacement_cap": 0.056408386677503586
+    },
+    "levels": [
+      {
+        "pitch": 16.442759967153023,
+        "assigned_faces": 273988,
+        "probe_count": 311,
+        "projected_outlier_faces": 2504
+      },
+      {
+        "pitch": 8.221379983576512,
+        "assigned_faces": 587899,
+        "probe_count": 2258,
+        "projected_outlier_faces": 5218
+      },
+      {
+        "pitch": 4.110689991788256,
+        "assigned_faces": 1172231,
+        "probe_count": 14350,
+        "projected_outlier_faces": 18234
+      },
+      {
+        "pitch": 2.055344995894128,
+        "assigned_faces": 1406000,
+        "probe_count": 51519,
+        "projected_outlier_faces": 18892
+      }
+    ],
+    "unresolved_faces": 686197,
+    "moved_vertex_share": 0.03742111947425704
+  },
+  "density_seconds": 0.926150699990103,
+  "runs": [
+    {
+      "name": "weight=0 volume=False",
+      "seconds": 65.60632110000006,
+      "triangles": 249999,
+      "vertices": 130205,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.11779651989881496,
+        "p95_percent": 0.23265826124327066,
+        "drift_percent": 0.000659672458541439,
+        "area_percent": 0.11804234800916191,
+        "nonmanifold_percent": 0.026400105600422403
+      }
+    },
+    {
+      "name": "weight=0.01 volume=False",
+      "seconds": 64.98490900000616,
+      "triangles": 250000,
+      "vertices": 130205,
+      "quality": {
+        "reduction_percent": 93.94132537142706,
+        "rms_percent": 0.117136235494767,
+        "p95_percent": 0.23079215442289244,
+        "drift_percent": 0.0006604136635510362,
+        "area_percent": 0.11800814840396967,
+        "nonmanifold_percent": 0.0248
+      }
+    },
+    {
+      "name": "weight=0.1 volume=False",
+      "seconds": 64.68899199999578,
+      "triangles": 249999,
+      "vertices": 130119,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.10123827607524721,
+        "p95_percent": 0.18522200948979273,
+        "drift_percent": 0.0018737662642615257,
+        "area_percent": 0.11780045169933473,
+        "nonmanifold_percent": 0.013200052800211201
+      }
+    },
+    {
+      "name": "weight=1 volume=False",
+      "seconds": 63.09204129999853,
+      "triangles": 250000,
+      "vertices": 131009,
+      "quality": {
+        "reduction_percent": 93.94132537142706,
+        "rms_percent": 0.0882656094486583,
+        "p95_percent": 0.147013778493273,
+        "drift_percent": 0.004370144736584634,
+        "area_percent": 0.13936748381997432,
+        "nonmanifold_percent": 0.0104
+      }
+    },
+    {
+      "name": "weight=10 volume=False",
+      "seconds": 63.42541500000516,
+      "triangles": 249999,
+      "vertices": 131345,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.09058799036251841,
+        "p95_percent": 0.14690841759955667,
+        "drift_percent": 0.06783137645328066,
+        "area_percent": 0.7469929272197473,
+        "nonmanifold_percent": 0.026800107200428802
+      }
+    },
+    {
+      "name": "weight=0 volume=True",
+      "seconds": 70.53071519998775,
+      "triangles": 249999,
+      "vertices": 130203,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.11806099556140663,
+        "p95_percent": 0.23353734859890654,
+        "drift_percent": 0.0006344714882151368,
+        "area_percent": 0.12388914840100185,
+        "nonmanifold_percent": 0.026000104000416
+      }
+    },
+    {
+      "name": "weight=0.01 volume=True",
+      "seconds": 69.60644299999694,
+      "triangles": 249999,
+      "vertices": 130202,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.11711499304981422,
+        "p95_percent": 0.2308188005371997,
+        "drift_percent": 0.0006352126932247339,
+        "area_percent": 0.12401119546618933,
+        "nonmanifold_percent": 0.024400097600390403
+      }
+    },
+    {
+      "name": "weight=0.1 volume=True",
+      "seconds": 67.1072889999923,
+      "triangles": 250000,
+      "vertices": 130117,
+      "quality": {
+        "reduction_percent": 93.94132537142706,
+        "rms_percent": 0.10120167982334388,
+        "p95_percent": 0.18522110259251343,
+        "drift_percent": 0.0018359648087720724,
+        "area_percent": 0.12526428195436257,
+        "nonmanifold_percent": 0.0172
+      }
+    }
+  ]
+}

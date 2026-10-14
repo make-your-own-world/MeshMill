@@ -1,0 +1,22 @@
+[
+  {
+    "auto": {
+      "alpha": 0.035966796875000005,
+      "initial_area_ratio": 1.001824978263248,
+      "final_area_ratio": 0.9999995956997001,
+      "extrema_maximum_change": 0.0
+    },
+    "topology": {
+      "nonmanifold_edges_before": 32,
+      "removed_faces": 39
+    },
+    "quality": {
+      "reduction_percent": 97.5774995365114,
+      "rms_percent": 0.15805758509192291,
+      "p95_percent": 0.2849289041955867,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 4.043002999054579e-05,
+      "nonmanifold_percent": 0.0
+    }
+  }
+]

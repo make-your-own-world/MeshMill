@@ -1,0 +1,67 @@
+[
+  {
+    "alpha": 0.03,
+    "extrema_maximum_change": 0.026323242187515916,
+    "signed_area_percent": 0.025553483685203382,
+    "quality": {
+      "reduction_percent": 93.94132537142706,
+      "rms_percent": 0.0969526558102878,
+      "p95_percent": 0.17463720050605197,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 0.025553483685203382,
+      "nonmanifold_percent": 0.0124
+    }
+  },
+  {
+    "alpha": 0.035,
+    "extrema_maximum_change": 0.030710449218759095,
+    "signed_area_percent": 0.010073385818221148,
+    "quality": {
+      "reduction_percent": 93.94132537142706,
+      "rms_percent": 0.0969206244357306,
+      "p95_percent": 0.17459820067487272,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 0.010073385818221148,
+      "nonmanifold_percent": 0.0124
+    }
+  },
+  {
+    "alpha": 0.038,
+    "extrema_maximum_change": 0.033342773437482265,
+    "signed_area_percent": 0.000793323829606507,
+    "quality": {
+      "reduction_percent": 93.94132537142706,
+      "rms_percent": 0.09690145313427126,
+      "p95_percent": 0.17454733196592903,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 0.000793323829606507,
+      "nonmanifold_percent": 0.0124
+    }
+  },
+  {
+    "alpha": 0.04,
+    "extrema_maximum_change": 0.035097656250002274,
+    "signed_area_percent": -0.005390099453561614,
+    "quality": {
+      "reduction_percent": 93.94132537142706,
+      "rms_percent": 0.09688870345545982,
+      "p95_percent": 0.1745121306996666,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 0.005390099453561614,
+      "nonmanifold_percent": 0.0124
+    }
+  },
+  {
+    "alpha": 0.05,
+    "extrema_maximum_change": 0.04387207031248863,
+    "signed_area_percent": -0.03626857551226603,
+    "quality": {
+      "reduction_percent": 93.94132537142706,
+      "rms_percent": 0.09682517158436271,
+      "p95_percent": 0.17437808232165256,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 0.03626857551226603,
+      "nonmanifold_percent": 0.0124
+    }
+  }
+]

@@ -28,4 +28,13 @@ if (-not (Test-Path -LiteralPath $Python)) {
 & $Python (Join-Path $ProjectRoot "tools\write_version_info.py") --version $Version
 & $Python -m PyInstaller --noconfirm (Join-Path $ProjectRoot "MeshMill.spec")
 
+$Cli = Join-Path $ProjectRoot "dist\MeshMill\MeshMillCLI.exe"
+if (-not (Test-Path -LiteralPath $Cli)) {
+    throw "Build did not produce MeshMillCLI.exe."
+}
+& $Cli --help
+if ($LASTEXITCODE -ne 0) {
+    throw "MeshMillCLI.exe --help failed with exit code $LASTEXITCODE."
+}
+
 Write-Host "Build complete: $ProjectRoot\dist\MeshMill"

@@ -1,0 +1,126 @@
+{
+  "connectivity_seconds": 16.564143600000534,
+  "depth_seconds": 1.0252079000056256,
+  "runs": [
+    {
+      "name": "direct-agg8",
+      "seconds": 14.315904500006582,
+      "triangles": 249919,
+      "vertices": 131951,
+      "quality": {
+        "reduction_percent": 93.94328838200671,
+        "rms_percent": 0.10324707766629793,
+        "p95_percent": 0.19914811434865745,
+        "drift_percent": 1.482410019194245e-06,
+        "area_percent": 2.985754314899225e-05,
+        "nonmanifold_percent": 0.0
+      },
+      "topology": {
+        "nonmanifold_edges_before": 48,
+        "removed_faces": 80
+      },
+      "surface": {
+        "alpha": 0.038291015625,
+        "initial_area_ratio": 1.0012340895410536,
+        "final_area_ratio": 0.9999997014245685,
+        "extrema_maximum_change": 0.0
+      }
+    },
+    {
+      "name": "direct-agg4.9",
+      "seconds": 16.16344570000365,
+      "triangles": 249921,
+      "vertices": 131950,
+      "quality": {
+        "reduction_percent": 93.94323991260968,
+        "rms_percent": 0.11978598327380031,
+        "p95_percent": 0.24514159309458203,
+        "drift_percent": 1.482410019194245e-06,
+        "area_percent": 2.565690251365993e-05,
+        "nonmanifold_percent": 0.0
+      },
+      "topology": {
+        "nonmanifold_edges_before": 51,
+        "removed_faces": 78
+      },
+      "surface": {
+        "alpha": 0.034423828125,
+        "initial_area_ratio": 1.0010627775091903,
+        "final_area_ratio": 1.0000002565690251,
+        "extrema_maximum_change": 0.0
+      }
+    },
+    {
+      "name": "staged-500k-agg8-then-250k-agg7",
+      "seconds": 13.806159300002037,
+      "triangles": 249949,
+      "vertices": 131947,
+      "quality": {
+        "reduction_percent": 93.94256134105127,
+        "rms_percent": 0.13133226719133118,
+        "p95_percent": 0.26950737321569046,
+        "drift_percent": 1.482410019194245e-06,
+        "area_percent": 1.2278801153620122e-05,
+        "nonmanifold_percent": 0.0
+      },
+      "topology": {
+        "nonmanifold_edges_before": 29,
+        "removed_faces": 50
+      },
+      "surface": {
+        "alpha": 0.034462890625,
+        "initial_area_ratio": 1.0009974960682748,
+        "final_area_ratio": 1.0000001227880115,
+        "extrema_maximum_change": 0.0
+      }
+    },
+    {
+      "name": "staged-500k-agg5-then-250k-agg7",
+      "seconds": 16.30469480001193,
+      "triangles": 249953,
+      "vertices": 131946,
+      "quality": {
+        "reduction_percent": 93.94246440225722,
+        "rms_percent": 0.15598490122724454,
+        "p95_percent": 0.32838028220249454,
+        "drift_percent": 1.482410019194245e-06,
+        "area_percent": 1.630721240264421e-05,
+        "nonmanifold_percent": 0.0
+      },
+      "topology": {
+        "nonmanifold_edges_before": 27,
+        "removed_faces": 46
+      },
+      "surface": {
+        "alpha": 0.033701171875000005,
+        "initial_area_ratio": 1.000962564230666,
+        "final_area_ratio": 0.999999836927876,
+        "extrema_maximum_change": 0.0
+      }
+    },
+    {
+      "name": "staged-1m-agg8-then-250k-agg7",
+      "seconds": 14.435231399998884,
+      "triangles": 249943,
+      "vertices": 131942,
+      "quality": {
+        "reduction_percent": 93.94270674924236,
+        "rms_percent": 0.13165878498197722,
+        "p95_percent": 0.27092585221434834,
+        "drift_percent": 1.482410019194245e-06,
+        "area_percent": 1.425007434274761e-05,
+        "nonmanifold_percent": 0.0
+      },
+      "topology": {
+        "nonmanifold_edges_before": 35,
+        "removed_faces": 56
+      },
+      "surface": {
+        "alpha": 0.035771484375,
+        "initial_area_ratio": 1.0010563386921212,
+        "final_area_ratio": 0.9999998574992566,
+        "extrema_maximum_change": 0.0
+      }
+    }
+  ]
+}

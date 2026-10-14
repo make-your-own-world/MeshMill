@@ -1,0 +1,159 @@
+{
+  "source_triangles": 4126315,
+  "source_vertices": 2070061,
+  "target_triangles": 100000,
+  "sample_count": 200000,
+  "connectivity_seconds": 14.837998600007268,
+  "runs": [
+    {
+      "name": "Fast QEM",
+      "seconds": 10.594034900001134,
+      "triangles": 99999,
+      "vertices": 56978,
+      "quality": {
+        "reduction_percent": 97.57655438326933,
+        "rms_percent": 0.19795355038611598,
+        "p95_percent": 0.3989268591535038,
+        "drift_percent": 0.005762673668093382,
+        "area_percent": 0.1438503410470915,
+        "nonmanifold_percent": 0.03800038000380004
+      },
+      "details": {},
+      "mesh": "benchmarks\\results\\depth-density-validation-100k-boundary100\\fast-qem.stl"
+    },
+    {
+      "name": "Density balanced",
+      "seconds": 12.508893199992599,
+      "triangles": 99999,
+      "vertices": 56975,
+      "quality": {
+        "reduction_percent": 97.57655438326933,
+        "rms_percent": 0.19708084551385058,
+        "p95_percent": 0.39735798055111976,
+        "drift_percent": 0.0066202040202399766,
+        "area_percent": 0.14246040335834653,
+        "nonmanifold_percent": 0.03500035000350003
+      },
+      "details": {},
+      "mesh": "benchmarks\\results\\depth-density-validation-100k-boundary100\\density-balanced.stl"
+    },
+    {
+      "name": "Depth Adaptive QEM",
+      "seconds": 10.43198169999232,
+      "triangles": 99999,
+      "vertices": 56974,
+      "quality": {
+        "reduction_percent": 97.57655438326933,
+        "rms_percent": 0.18342270739092714,
+        "p95_percent": 0.36183734525613037,
+        "drift_percent": 6.775271524583841e-05,
+        "area_percent": 0.18839506851093812,
+        "nonmanifold_percent": 0.04000040000400004
+      },
+      "details": {
+        "backend": "CUDA",
+        "device_id": 0,
+        "device_preference": "system",
+        "seconds": 0.9558734000020195,
+        "probe_geometry": {
+          "diameter": 0.4512670934200287,
+          "tip_radius": 0.22563354671001434,
+          "minimum_pitch": 3.249785782227435,
+          "maximum_pitch": 25.99828625781948,
+          "displacement_cap": 0.056408386677503586
+        },
+        "levels": [
+          {
+            "pitch": 25.99828625781948,
+            "assigned_faces": 71018,
+            "probe_count": 46,
+            "projected_outlier_faces": 1442
+          },
+          {
+            "pitch": 12.99914312890974,
+            "assigned_faces": 314336,
+            "probe_count": 585,
+            "projected_outlier_faces": 1432
+          },
+          {
+            "pitch": 6.49957156445487,
+            "assigned_faces": 820301,
+            "probe_count": 4537,
+            "projected_outlier_faces": 7954
+          },
+          {
+            "pitch": 3.249785782227435,
+            "assigned_faces": 1331248,
+            "probe_count": 23631,
+            "projected_outlier_faces": 18043
+          }
+        ],
+        "unresolved_faces": 1589412,
+        "moved_vertex_share": 0.021689215921656416
+      },
+      "mesh": "benchmarks\\results\\depth-density-validation-100k-boundary100\\depth-adaptive-qem.stl"
+    },
+    {
+      "name": "Depth Density Adaptive QEM",
+      "seconds": 76.5983305000118,
+      "triangles": 100000,
+      "vertices": 55598,
+      "quality": {
+        "reduction_percent": 97.57653014857081,
+        "rms_percent": 0.16188676089557977,
+        "p95_percent": 0.29215045268580636,
+        "drift_percent": 0.003594103091536447,
+        "area_percent": 0.20094744511673923,
+        "nonmanifold_percent": 0.028
+      },
+      "details": {
+        "density_weight": 0.15,
+        "normal_weight": 0.1,
+        "boundary_weight": 100.0,
+        "feature_seconds": 1.95598240000254,
+        "depth_analysis": {
+          "backend": "CUDA",
+          "device_id": 0,
+          "device_preference": "system",
+          "seconds": 0.9558734000020195,
+          "probe_geometry": {
+            "diameter": 0.4512670934200287,
+            "tip_radius": 0.22563354671001434,
+            "minimum_pitch": 3.249785782227435,
+            "maximum_pitch": 25.99828625781948,
+            "displacement_cap": 0.056408386677503586
+          },
+          "levels": [
+            {
+              "pitch": 25.99828625781948,
+              "assigned_faces": 71018,
+              "probe_count": 46,
+              "projected_outlier_faces": 1442
+            },
+            {
+              "pitch": 12.99914312890974,
+              "assigned_faces": 314336,
+              "probe_count": 585,
+              "projected_outlier_faces": 1432
+            },
+            {
+              "pitch": 6.49957156445487,
+              "assigned_faces": 820301,
+              "probe_count": 4537,
+              "projected_outlier_faces": 7954
+            },
+            {
+              "pitch": 3.249785782227435,
+              "assigned_faces": 1331248,
+              "probe_count": 23631,
+              "projected_outlier_faces": 18043
+            }
+          ],
+          "unresolved_faces": 1589412,
+          "moved_vertex_share": 0.021689215921656416
+        }
+      },
+      "mesh": "benchmarks\\results\\depth-density-validation-100k-boundary100\\depth-density-adaptive-qem.stl"
+    }
+  ]
+}

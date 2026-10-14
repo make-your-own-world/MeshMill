@@ -1,0 +1,134 @@
+{
+  "source_triangles": 4126315,
+  "source_vertices": 2070061,
+  "target_triangles": 250000,
+  "connectivity_seconds": 15.055752100000973,
+  "depth_analysis": {
+    "backend": "CUDA",
+    "device_id": 0,
+    "device_preference": "system",
+    "seconds": 1.0324774000036996,
+    "probe_geometry": {
+      "diameter": 0.4512670934200287,
+      "tip_radius": 0.22563354671001434,
+      "minimum_pitch": 2.055344995894128,
+      "maximum_pitch": 16.442759967153023,
+      "displacement_cap": 0.056408386677503586
+    },
+    "levels": [
+      {
+        "pitch": 16.442759967153023,
+        "assigned_faces": 273988,
+        "probe_count": 311,
+        "projected_outlier_faces": 2504
+      },
+      {
+        "pitch": 8.221379983576512,
+        "assigned_faces": 587899,
+        "probe_count": 2258,
+        "projected_outlier_faces": 5218
+      },
+      {
+        "pitch": 4.110689991788256,
+        "assigned_faces": 1172231,
+        "probe_count": 14350,
+        "projected_outlier_faces": 18234
+      },
+      {
+        "pitch": 2.055344995894128,
+        "assigned_faces": 1406000,
+        "probe_count": 51519,
+        "projected_outlier_faces": 18892
+      }
+    ],
+    "unresolved_faces": 686197,
+    "moved_vertex_share": 0.03742111947425704
+  },
+  "density_seconds": 0.8710313000046881,
+  "runs": [
+    {
+      "name": "weight=0.03 volume=False",
+      "seconds": 66.45906210000976,
+      "triangles": 249999,
+      "vertices": 130187,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.11311303833932425,
+        "p95_percent": 0.21985451630328517,
+        "drift_percent": 0.0006626372785798275,
+        "area_percent": 0.11788920625319665,
+        "nonmanifold_percent": 0.0256001024004096
+      }
+    },
+    {
+      "name": "weight=0.05 volume=False",
+      "seconds": 67.10608630000206,
+      "triangles": 249999,
+      "vertices": 130171,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.10902876900931596,
+        "p95_percent": 0.20760257630999424,
+        "drift_percent": 0.0006685669186566045,
+        "area_percent": 0.11832012986723317,
+        "nonmanifold_percent": 0.0188000752003008
+      }
+    },
+    {
+      "name": "weight=0.075 volume=False",
+      "seconds": 67.72392260000925,
+      "triangles": 250000,
+      "vertices": 130148,
+      "quality": {
+        "reduction_percent": 93.94132537142706,
+        "rms_percent": 0.10455135750807175,
+        "p95_percent": 0.19488590177698775,
+        "drift_percent": 0.0014082895182345326,
+        "area_percent": 0.11882984878477387,
+        "nonmanifold_percent": 0.0196
+      }
+    },
+    {
+      "name": "weight=0.15 volume=False",
+      "seconds": 68.39013100000739,
+      "triangles": 249999,
+      "vertices": 130101,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.09709081157205389,
+        "p95_percent": 0.17439331392874424,
+        "drift_percent": 0.0013816061378890362,
+        "area_percent": 0.1209544614695579,
+        "nonmanifold_percent": 0.0156000624002496
+      }
+    },
+    {
+      "name": "weight=0.25 volume=False",
+      "seconds": 69.1540696000011,
+      "triangles": 250000,
+      "vertices": 130116,
+      "quality": {
+        "reduction_percent": 93.94132537142706,
+        "rms_percent": 0.09227407325635356,
+        "p95_percent": 0.16099539699837329,
+        "drift_percent": 0.002842521211804965,
+        "area_percent": 0.12193629724599475,
+        "nonmanifold_percent": 0.0096
+      }
+    },
+    {
+      "name": "weight=0.5 volume=False",
+      "seconds": 67.08489980000013,
+      "triangles": 250000,
+      "vertices": 130403,
+      "quality": {
+        "reduction_percent": 93.94132537142706,
+        "rms_percent": 0.08875156107829427,
+        "p95_percent": 0.15132897144186216,
+        "drift_percent": 0.0023992806160658855,
+        "area_percent": 0.12840241057698876,
+        "nonmanifold_percent": 0.0104
+      }
+    }
+  ]
+}
