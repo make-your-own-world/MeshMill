@@ -1,0 +1,142 @@
+[
+  {
+    "density_weight": 0.05,
+    "normal_weight": 0.025,
+    "scale_multiplier": 1.0,
+    "seconds": 15.125802900001872,
+    "qem_seconds": 10.1523259000096,
+    "finishing_seconds": 3.321311899999273,
+    "triangles": 249864,
+    "vertices": 131917,
+    "quality": {
+      "reduction_percent": 93.94462129042499,
+      "rms_percent": 0.10001632015989702,
+      "p95_percent": 0.18923573443091105,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 3.1075721107498566e-06,
+      "nonmanifold_percent": 0.0
+    },
+    "topology": {
+      "nonmanifold_edges_before": 89,
+      "removed_faces": 135
+    },
+    "surface": {
+      "alpha": 0.040166015625,
+      "initial_area_ratio": 1.0012969352721588,
+      "final_area_ratio": 0.9999999689242789,
+      "extrema_maximum_change": 0.0
+    }
+  },
+  {
+    "density_weight": 0.1,
+    "normal_weight": 0.05,
+    "scale_multiplier": 1.0,
+    "seconds": 14.800222000005306,
+    "qem_seconds": 9.996825600013835,
+    "finishing_seconds": 3.1512312999984715,
+    "triangles": 249887,
+    "vertices": 131917,
+    "quality": {
+      "reduction_percent": 93.94406389235917,
+      "rms_percent": 0.09929447523800199,
+      "p95_percent": 0.18681795930520154,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 7.474867635970384e-06,
+      "nonmanifold_percent": 0.0
+    },
+    "topology": {
+      "nonmanifold_edges_before": 69,
+      "removed_faces": 112
+    },
+    "surface": {
+      "alpha": 0.042236328125,
+      "initial_area_ratio": 1.0013826752694803,
+      "final_area_ratio": 1.0000000747486764,
+      "extrema_maximum_change": 0.0
+    }
+  },
+  {
+    "density_weight": 0.2,
+    "normal_weight": 0.1,
+    "scale_multiplier": 1.0,
+    "seconds": 14.857021499992697,
+    "qem_seconds": 9.944043800001964,
+    "finishing_seconds": 3.2608125999977347,
+    "triangles": 249912,
+    "vertices": 131911,
+    "quality": {
+      "reduction_percent": 93.94345802489632,
+      "rms_percent": 0.10010002702283073,
+      "p95_percent": 0.18958146292262915,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 1.7203989366443295e-05,
+      "nonmanifold_percent": 0.0
+    },
+    "topology": {
+      "nonmanifold_edges_before": 50,
+      "removed_faces": 87
+    },
+    "surface": {
+      "alpha": 0.04401367187499999,
+      "initial_area_ratio": 1.0014594421220493,
+      "final_area_ratio": 1.0000001720398937,
+      "extrema_maximum_change": 0.0
+    }
+  },
+  {
+    "density_weight": 0.1,
+    "normal_weight": 0.0,
+    "scale_multiplier": 1.0,
+    "seconds": 14.766219799988903,
+    "qem_seconds": 9.977864499989664,
+    "finishing_seconds": 3.13619020000624,
+    "triangles": 249913,
+    "vertices": 131953,
+    "quality": {
+      "reduction_percent": 93.9434337901978,
+      "rms_percent": 0.09849571121349568,
+      "p95_percent": 0.1857165166629565,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 1.1010901568297982e-05,
+      "nonmanifold_percent": 0.0
+    },
+    "topology": {
+      "nonmanifold_edges_before": 57,
+      "removed_faces": 86
+    },
+    "surface": {
+      "alpha": 0.040302734375,
+      "initial_area_ratio": 1.0013224888953685,
+      "final_area_ratio": 1.0000001101090157,
+      "extrema_maximum_change": 0.0
+    }
+  },
+  {
+    "density_weight": 0.0,
+    "normal_weight": 0.05,
+    "scale_multiplier": 1.0,
+    "seconds": 14.414877699979115,
+    "qem_seconds": 9.781906599993818,
+    "finishing_seconds": 2.980805999992299,
+    "triangles": 249897,
+    "vertices": 131915,
+    "quality": {
+      "reduction_percent": 93.94382154537402,
+      "rms_percent": 0.10476959150467689,
+      "p95_percent": 0.20258422945174495,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 9.947496404372203e-06,
+      "nonmanifold_percent": 0.0
+    },
+    "topology": {
+      "nonmanifold_edges_before": 57,
+      "removed_faces": 102
+    },
+    "surface": {
+      "alpha": 0.03916992187500001,
+      "initial_area_ratio": 1.0012355971516866,
+      "final_area_ratio": 1.000000099474964,
+      "extrema_maximum_change": 0.0
+    }
+  }
+]

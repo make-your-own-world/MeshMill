@@ -1,0 +1,18 @@
+[
+  {
+    "auto": {
+      "alpha": 0.036494140625000004,
+      "initial_area_ratio": 1.0018521769656923,
+      "final_area_ratio": 1.0000004116098191,
+      "extrema_maximum_change": 0.0
+    },
+    "quality": {
+      "reduction_percent": 97.57655438326933,
+      "rms_percent": 0.1580510681527531,
+      "p95_percent": 0.2849228824184018,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 4.1160981911758654e-05,
+      "nonmanifold_percent": 0.03200032000320003
+    }
+  }
+]

@@ -1,0 +1,634 @@
+{
+  "source": {
+    "triangles": 4126315,
+    "vertices": 2070061,
+    "connectivity_seconds": 15.197544499998912,
+    "load_and_connectivity_seconds": 15.241072399992845
+  },
+  "target_triangles": 250000,
+  "sample_count": 200000,
+  "runs": [
+    {
+      "name": "Fast QEM",
+      "seconds": 10.409981499993592,
+      "triangles": 249999,
+      "vertices": 131947,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.11587412215536133,
+        "p95_percent": 0.2330720955351081,
+        "drift_percent": 0.000519327712923959,
+        "area_percent": 0.046281861160402116,
+        "nonmanifold_percent": 0.020800083200332803
+      },
+      "details": {}
+    },
+    {
+      "name": "Density balanced",
+      "seconds": 11.49755779998668,
+      "triangles": 249999,
+      "vertices": 131947,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.11697579408421861,
+        "p95_percent": 0.23647223614360777,
+        "drift_percent": 0.0002944031250678644,
+        "area_percent": 0.040545692234372765,
+        "nonmanifold_percent": 0.020800083200332803
+      },
+      "details": {}
+    },
+    {
+      "name": "Depth Adaptive QEM",
+      "seconds": 10.769086300002527,
+      "triangles": 249999,
+      "vertices": 131951,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.10364523229518702,
+        "p95_percent": 0.19999706908545634,
+        "drift_percent": 0.002269930982829458,
+        "area_percent": 0.1241233149583243,
+        "nonmanifold_percent": 0.019200076800307202
+      },
+      "details": {
+        "backend": "CUDA",
+        "device_id": 0,
+        "device_preference": "system",
+        "seconds": 1.2711057000124129,
+        "probe_geometry": {
+          "diameter": 0.4512670934200287,
+          "tip_radius": 0.22563354671001434,
+          "minimum_pitch": 2.055344995894128,
+          "maximum_pitch": 16.442759967153023,
+          "displacement_cap": 0.056408386677503586
+        },
+        "levels": [
+          {
+            "pitch": 16.442759967153023,
+            "assigned_faces": 273988,
+            "probe_count": 311,
+            "projected_outlier_faces": 2504
+          },
+          {
+            "pitch": 8.221379983576512,
+            "assigned_faces": 587899,
+            "probe_count": 2258,
+            "projected_outlier_faces": 5218
+          },
+          {
+            "pitch": 4.110689991788256,
+            "assigned_faces": 1172231,
+            "probe_count": 14350,
+            "projected_outlier_faces": 18234
+          },
+          {
+            "pitch": 2.055344995894128,
+            "assigned_faces": 1406000,
+            "probe_count": 51519,
+            "projected_outlier_faces": 18892
+          }
+        ],
+        "unresolved_faces": 686197,
+        "moved_vertex_share": 0.03742111947425704,
+        "qem_seconds": 9.263783200003672
+      }
+    },
+    {
+      "name": "Depth Density Adaptive QEM floor=1.00 ceiling=1.25 center=-0.25 slope=1.00 agg=6.0",
+      "seconds": 11.061709500005236,
+      "triangles": 249999,
+      "vertices": 131952,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.12007579561773454,
+        "p95_percent": 0.24528489433005599,
+        "drift_percent": 0.0012487723325302043,
+        "area_percent": 0.10852439205555342,
+        "nonmanifold_percent": 0.02000008000032
+      },
+      "details": {
+        "backend": "CUDA",
+        "device_id": 0,
+        "device_preference": "system",
+        "seconds": 0.804676700005075,
+        "probe_geometry": {
+          "diameter": 0.4512670934200287,
+          "tip_radius": 0.22563354671001434,
+          "minimum_pitch": 2.055344995894128,
+          "maximum_pitch": 16.442759967153023,
+          "displacement_cap": 0.056408386677503586
+        },
+        "levels": [
+          {
+            "pitch": 16.442759967153023,
+            "assigned_faces": 273988,
+            "probe_count": 311,
+            "projected_outlier_faces": 2504
+          },
+          {
+            "pitch": 8.221379983576512,
+            "assigned_faces": 587899,
+            "probe_count": 2258,
+            "projected_outlier_faces": 5218
+          },
+          {
+            "pitch": 4.110689991788256,
+            "assigned_faces": 1172231,
+            "probe_count": 14350,
+            "projected_outlier_faces": 18234
+          },
+          {
+            "pitch": 2.055344995894128,
+            "assigned_faces": 1406000,
+            "probe_count": 51519,
+            "projected_outlier_faces": 18892
+          }
+        ],
+        "unresolved_faces": 686197,
+        "moved_vertex_share": 0.03742111947425704,
+        "density_adaptation": {
+          "median_log_density": 2.3534979820251465,
+          "robust_sigma": 0.9220848679542542,
+          "gain_min": 1.0128930807113647,
+          "gain_mean": 1.1441384553909302,
+          "gain_max": 1.2499985694885254,
+          "floor": 1.0,
+          "ceiling": 1.25,
+          "center_z": -0.25,
+          "slope": 1.0
+        },
+        "qem_seconds": 10.257032800000161
+      }
+    },
+    {
+      "name": "Depth Density Adaptive QEM floor=1.00 ceiling=1.25 center=-0.25 slope=1.00 agg=8.0",
+      "seconds": 9.868882499999017,
+      "triangles": 249999,
+      "vertices": 131951,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.10372804020257043,
+        "p95_percent": 0.20027527533304676,
+        "drift_percent": 0.002269930982829458,
+        "area_percent": 0.12433002934764126,
+        "nonmanifold_percent": 0.019200076800307202
+      },
+      "details": {
+        "backend": "CUDA",
+        "device_id": 0,
+        "device_preference": "system",
+        "seconds": 0.804676700005075,
+        "probe_geometry": {
+          "diameter": 0.4512670934200287,
+          "tip_radius": 0.22563354671001434,
+          "minimum_pitch": 2.055344995894128,
+          "maximum_pitch": 16.442759967153023,
+          "displacement_cap": 0.056408386677503586
+        },
+        "levels": [
+          {
+            "pitch": 16.442759967153023,
+            "assigned_faces": 273988,
+            "probe_count": 311,
+            "projected_outlier_faces": 2504
+          },
+          {
+            "pitch": 8.221379983576512,
+            "assigned_faces": 587899,
+            "probe_count": 2258,
+            "projected_outlier_faces": 5218
+          },
+          {
+            "pitch": 4.110689991788256,
+            "assigned_faces": 1172231,
+            "probe_count": 14350,
+            "projected_outlier_faces": 18234
+          },
+          {
+            "pitch": 2.055344995894128,
+            "assigned_faces": 1406000,
+            "probe_count": 51519,
+            "projected_outlier_faces": 18892
+          }
+        ],
+        "unresolved_faces": 686197,
+        "moved_vertex_share": 0.03742111947425704,
+        "density_adaptation": {
+          "median_log_density": 2.3534979820251465,
+          "robust_sigma": 0.9220848679542542,
+          "gain_min": 1.0128930807113647,
+          "gain_mean": 1.1441384553909302,
+          "gain_max": 1.2499985694885254,
+          "floor": 1.0,
+          "ceiling": 1.25,
+          "center_z": -0.25,
+          "slope": 1.0
+        },
+        "qem_seconds": 9.064205799993942
+      }
+    },
+    {
+      "name": "Depth Density Adaptive QEM floor=1.00 ceiling=1.50 center=0.00 slope=1.50 agg=6.0",
+      "seconds": 11.096011699992232,
+      "triangles": 249999,
+      "vertices": 131953,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.12005193559794351,
+        "p95_percent": 0.2452300475662354,
+        "drift_percent": 0.001251121700777925,
+        "area_percent": 0.10876435396636186,
+        "nonmanifold_percent": 0.0188000752003008
+      },
+      "details": {
+        "backend": "CUDA",
+        "device_id": 0,
+        "device_preference": "system",
+        "seconds": 0.6109666999982437,
+        "probe_geometry": {
+          "diameter": 0.4512670934200287,
+          "tip_radius": 0.22563354671001434,
+          "minimum_pitch": 2.055344995894128,
+          "maximum_pitch": 16.442759967153023,
+          "displacement_cap": 0.056408386677503586
+        },
+        "levels": [
+          {
+            "pitch": 16.442759967153023,
+            "assigned_faces": 273988,
+            "probe_count": 311,
+            "projected_outlier_faces": 2504
+          },
+          {
+            "pitch": 8.221379983576512,
+            "assigned_faces": 587899,
+            "probe_count": 2258,
+            "projected_outlier_faces": 5218
+          },
+          {
+            "pitch": 4.110689991788256,
+            "assigned_faces": 1172231,
+            "probe_count": 14350,
+            "projected_outlier_faces": 18234
+          },
+          {
+            "pitch": 2.055344995894128,
+            "assigned_faces": 1406000,
+            "probe_count": 51519,
+            "projected_outlier_faces": 18892
+          }
+        ],
+        "unresolved_faces": 686197,
+        "moved_vertex_share": 0.03742111947425704,
+        "density_adaptation": {
+          "median_log_density": 2.3534979820251465,
+          "robust_sigma": 0.9220848679542542,
+          "gain_min": 1.0043197870254517,
+          "gain_mean": 1.264363408088684,
+          "gain_max": 1.5,
+          "floor": 1.0,
+          "ceiling": 1.5,
+          "center_z": 0.0,
+          "slope": 1.5
+        },
+        "qem_seconds": 10.485044999993988
+      }
+    },
+    {
+      "name": "Depth Density Adaptive QEM floor=1.00 ceiling=1.50 center=0.00 slope=1.50 agg=8.0",
+      "seconds": 9.833702499992796,
+      "triangles": 249999,
+      "vertices": 131951,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.10368436133600782,
+        "p95_percent": 0.2001318688722136,
+        "drift_percent": 0.002269930982829458,
+        "area_percent": 0.12442720219283387,
+        "nonmanifold_percent": 0.019200076800307202
+      },
+      "details": {
+        "backend": "CUDA",
+        "device_id": 0,
+        "device_preference": "system",
+        "seconds": 0.6109666999982437,
+        "probe_geometry": {
+          "diameter": 0.4512670934200287,
+          "tip_radius": 0.22563354671001434,
+          "minimum_pitch": 2.055344995894128,
+          "maximum_pitch": 16.442759967153023,
+          "displacement_cap": 0.056408386677503586
+        },
+        "levels": [
+          {
+            "pitch": 16.442759967153023,
+            "assigned_faces": 273988,
+            "probe_count": 311,
+            "projected_outlier_faces": 2504
+          },
+          {
+            "pitch": 8.221379983576512,
+            "assigned_faces": 587899,
+            "probe_count": 2258,
+            "projected_outlier_faces": 5218
+          },
+          {
+            "pitch": 4.110689991788256,
+            "assigned_faces": 1172231,
+            "probe_count": 14350,
+            "projected_outlier_faces": 18234
+          },
+          {
+            "pitch": 2.055344995894128,
+            "assigned_faces": 1406000,
+            "probe_count": 51519,
+            "projected_outlier_faces": 18892
+          }
+        ],
+        "unresolved_faces": 686197,
+        "moved_vertex_share": 0.03742111947425704,
+        "density_adaptation": {
+          "median_log_density": 2.3534979820251465,
+          "robust_sigma": 0.9220848679542542,
+          "gain_min": 1.0043197870254517,
+          "gain_mean": 1.264363408088684,
+          "gain_max": 1.5,
+          "floor": 1.0,
+          "ceiling": 1.5,
+          "center_z": 0.0,
+          "slope": 1.5
+        },
+        "qem_seconds": 9.222735799994553
+      }
+    },
+    {
+      "name": "Depth Density Adaptive QEM floor=1.00 ceiling=1.75 center=0.25 slope=1.50 agg=6.0",
+      "seconds": 10.916541499987943,
+      "triangles": 249999,
+      "vertices": 131953,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.12006448863875907,
+        "p95_percent": 0.24519413385914035,
+        "drift_percent": 0.0012533643721555556,
+        "area_percent": 0.10887244661503814,
+        "nonmanifold_percent": 0.0188000752003008
+      },
+      "details": {
+        "backend": "CUDA",
+        "device_id": 0,
+        "device_preference": "system",
+        "seconds": 0.7265974999900209,
+        "probe_geometry": {
+          "diameter": 0.4512670934200287,
+          "tip_radius": 0.22563354671001434,
+          "minimum_pitch": 2.055344995894128,
+          "maximum_pitch": 16.442759967153023,
+          "displacement_cap": 0.056408386677503586
+        },
+        "levels": [
+          {
+            "pitch": 16.442759967153023,
+            "assigned_faces": 273988,
+            "probe_count": 311,
+            "projected_outlier_faces": 2504
+          },
+          {
+            "pitch": 8.221379983576512,
+            "assigned_faces": 587899,
+            "probe_count": 2258,
+            "projected_outlier_faces": 5218
+          },
+          {
+            "pitch": 4.110689991788256,
+            "assigned_faces": 1172231,
+            "probe_count": 14350,
+            "projected_outlier_faces": 18234
+          },
+          {
+            "pitch": 2.055344995894128,
+            "assigned_faces": 1406000,
+            "probe_count": 51519,
+            "projected_outlier_faces": 18892
+          }
+        ],
+        "unresolved_faces": 686197,
+        "moved_vertex_share": 0.03742111947425704,
+        "density_adaptation": {
+          "median_log_density": 2.3534979820251465,
+          "robust_sigma": 0.9220848679542542,
+          "gain_min": 1.0044654607772827,
+          "gain_mean": 1.342600703239441,
+          "gain_max": 1.75,
+          "floor": 1.0,
+          "ceiling": 1.75,
+          "center_z": 0.25,
+          "slope": 1.5
+        },
+        "qem_seconds": 10.189943999997922
+      }
+    },
+    {
+      "name": "Depth Density Adaptive QEM floor=1.00 ceiling=1.75 center=0.25 slope=1.50 agg=8.0",
+      "seconds": 10.051452999992762,
+      "triangles": 249999,
+      "vertices": 131952,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.1037240732521868,
+        "p95_percent": 0.20025887956239366,
+        "drift_percent": 0.002269930982829458,
+        "area_percent": 0.12457833425976172,
+        "nonmanifold_percent": 0.019200076800307202
+      },
+      "details": {
+        "backend": "CUDA",
+        "device_id": 0,
+        "device_preference": "system",
+        "seconds": 0.7265974999900209,
+        "probe_geometry": {
+          "diameter": 0.4512670934200287,
+          "tip_radius": 0.22563354671001434,
+          "minimum_pitch": 2.055344995894128,
+          "maximum_pitch": 16.442759967153023,
+          "displacement_cap": 0.056408386677503586
+        },
+        "levels": [
+          {
+            "pitch": 16.442759967153023,
+            "assigned_faces": 273988,
+            "probe_count": 311,
+            "projected_outlier_faces": 2504
+          },
+          {
+            "pitch": 8.221379983576512,
+            "assigned_faces": 587899,
+            "probe_count": 2258,
+            "projected_outlier_faces": 5218
+          },
+          {
+            "pitch": 4.110689991788256,
+            "assigned_faces": 1172231,
+            "probe_count": 14350,
+            "projected_outlier_faces": 18234
+          },
+          {
+            "pitch": 2.055344995894128,
+            "assigned_faces": 1406000,
+            "probe_count": 51519,
+            "projected_outlier_faces": 18892
+          }
+        ],
+        "unresolved_faces": 686197,
+        "moved_vertex_share": 0.03742111947425704,
+        "density_adaptation": {
+          "median_log_density": 2.3534979820251465,
+          "robust_sigma": 0.9220848679542542,
+          "gain_min": 1.0044654607772827,
+          "gain_mean": 1.342600703239441,
+          "gain_max": 1.75,
+          "floor": 1.0,
+          "ceiling": 1.75,
+          "center_z": 0.25,
+          "slope": 1.5
+        },
+        "qem_seconds": 9.32485550000274
+      }
+    },
+    {
+      "name": "Depth Density Adaptive QEM floor=1.00 ceiling=2.00 center=0.50 slope=2.00 agg=6.0",
+      "seconds": 10.867019500001334,
+      "triangles": 249999,
+      "vertices": 131953,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.12007913786483666,
+        "p95_percent": 0.24524717003839544,
+        "drift_percent": 0.0012346782786107856,
+        "area_percent": 0.1085754750510759,
+        "nonmanifold_percent": 0.0188000752003008
+      },
+      "details": {
+        "backend": "CUDA",
+        "device_id": 0,
+        "device_preference": "system",
+        "seconds": 0.6879611000040313,
+        "probe_geometry": {
+          "diameter": 0.4512670934200287,
+          "tip_radius": 0.22563354671001434,
+          "minimum_pitch": 2.055344995894128,
+          "maximum_pitch": 16.442759967153023,
+          "displacement_cap": 0.056408386677503586
+        },
+        "levels": [
+          {
+            "pitch": 16.442759967153023,
+            "assigned_faces": 273988,
+            "probe_count": 311,
+            "projected_outlier_faces": 2504
+          },
+          {
+            "pitch": 8.221379983576512,
+            "assigned_faces": 587899,
+            "probe_count": 2258,
+            "projected_outlier_faces": 5218
+          },
+          {
+            "pitch": 4.110689991788256,
+            "assigned_faces": 1172231,
+            "probe_count": 14350,
+            "projected_outlier_faces": 18234
+          },
+          {
+            "pitch": 2.055344995894128,
+            "assigned_faces": 1406000,
+            "probe_count": 51519,
+            "projected_outlier_faces": 18892
+          }
+        ],
+        "unresolved_faces": 686197,
+        "moved_vertex_share": 0.03742111947425704,
+        "density_adaptation": {
+          "median_log_density": 2.3534979820251465,
+          "robust_sigma": 0.9220848679542542,
+          "gain_min": 1.0006593465805054,
+          "gain_mean": 1.3699473142623901,
+          "gain_max": 2.0,
+          "floor": 1.0,
+          "ceiling": 2.0,
+          "center_z": 0.5,
+          "slope": 2.0
+        },
+        "qem_seconds": 10.179058399997302
+      }
+    },
+    {
+      "name": "Depth Density Adaptive QEM floor=1.00 ceiling=2.00 center=0.50 slope=2.00 agg=8.0",
+      "seconds": 10.26950609999767,
+      "triangles": 249999,
+      "vertices": 131951,
+      "quality": {
+        "reduction_percent": 93.94134960612557,
+        "rms_percent": 0.10372313031230955,
+        "p95_percent": 0.2002845182097243,
+        "drift_percent": 0.002269930982829458,
+        "area_percent": 0.1245183004141337,
+        "nonmanifold_percent": 0.019200076800307202
+      },
+      "details": {
+        "backend": "CUDA",
+        "device_id": 0,
+        "device_preference": "system",
+        "seconds": 0.6879611000040313,
+        "probe_geometry": {
+          "diameter": 0.4512670934200287,
+          "tip_radius": 0.22563354671001434,
+          "minimum_pitch": 2.055344995894128,
+          "maximum_pitch": 16.442759967153023,
+          "displacement_cap": 0.056408386677503586
+        },
+        "levels": [
+          {
+            "pitch": 16.442759967153023,
+            "assigned_faces": 273988,
+            "probe_count": 311,
+            "projected_outlier_faces": 2504
+          },
+          {
+            "pitch": 8.221379983576512,
+            "assigned_faces": 587899,
+            "probe_count": 2258,
+            "projected_outlier_faces": 5218
+          },
+          {
+            "pitch": 4.110689991788256,
+            "assigned_faces": 1172231,
+            "probe_count": 14350,
+            "projected_outlier_faces": 18234
+          },
+          {
+            "pitch": 2.055344995894128,
+            "assigned_faces": 1406000,
+            "probe_count": 51519,
+            "projected_outlier_faces": 18892
+          }
+        ],
+        "unresolved_faces": 686197,
+        "moved_vertex_share": 0.03742111947425704,
+        "density_adaptation": {
+          "median_log_density": 2.3534979820251465,
+          "robust_sigma": 0.9220848679542542,
+          "gain_min": 1.0006593465805054,
+          "gain_mean": 1.3699473142623901,
+          "gain_max": 2.0,
+          "floor": 1.0,
+          "ceiling": 2.0,
+          "center_z": 0.5,
+          "slope": 2.0
+        },
+        "qem_seconds": 9.581544999993639
+      }
+    }
+  ]
+}

@@ -8,13 +8,14 @@ reducers from display analysis and research prototypes.
 
 | UI name | Implementation | Main objective | Boundary behavior | Typical use |
 | --- | --- | --- | --- | --- |
+| Depth + Density Adaptive QEM | GPU-adaptive physical probes, density-aware surface guidance, and `fast-simplification` assembly | Preserve useful surface detail while discounting redundant scan concentration | Preserves open boundaries during QEM assembly | Highest-quality supported GPU reduction |
 | Depth Adaptive QEM | GPU-adaptive physical probes with `fast-simplification` assembly | Remove supported scan-scale variation while preserving overall form | Preserves open boundaries during QEM assembly | Optional higher-quality reduction on supported GPUs |
 | Fast QEM | `fast-simplification` | Reach the target quickly with quadric-error edge collapses | Normal backend behavior | General reduction |
 | Density balanced | `fast-simplification` with lower aggressiveness and `preserve_border=True` | Make the Fast QEM pass more conservative around open scan boundaries | Pins boundary vertices | Uneven, open, layered scan geometry |
 | Shape preserving | `vtkQuadricDecimation` with volume preservation | Reduce normal-direction and volume error | VTK quadric boundary constraints | Rounded and solid-looking forms |
 | Preserve topology | `vtkDecimatePro` with topology preservation, splitting off, and boundary deletion off | Avoid topology-changing operations | Preserves boundaries and topology | Holes, open edges, and connectivity matter more than speed |
 
-All five operate on triangle meshes. Depth Adaptive QEM uses the GPU for regular surface analysis
+All six operate on triangle meshes. The two depth-guided methods use the GPU for regular surface analysis
 and native Fast QEM for dependency-heavy topology mutation. The remaining reducers use native CPU
 libraries. The GPU also renders the viewport.
 
@@ -638,8 +639,8 @@ Retesting the same physical-probe analysis with Fast QEM aggressiveness 8 change
 full resident runs took 10.481, 10.112, and 10.156 seconds. The output was deterministic across the
 runs: 249,999 triangles, 1.0668 mm RMS, 2.0586 mm P95, 0.0234 mm maximum dimension drift, 0.1241%
 surface-area error, 14,215 boundary edges, and 48 non-manifold edges. This measured configuration is
-the production Depth Adaptive QEM configuration. Fast QEM remains the application default and does
-not initialize the GPU analysis backend.
+the production Depth Adaptive QEM configuration. The later Depth + Density Adaptive QEM method is
+the application default when its GPU backend is available; Density balanced is the fallback default.
 
 Two triangle-budget refinements were tested:
 

@@ -27,12 +27,12 @@ draw, rotate, and inspect meshes. Depth Adaptive QEM asks the GPU to perform a s
 CUDA surface measurement before reduction. MeshMill bundles the minimal NVIDIA computation
 libraries used by this path, avoiding a separate component or system-wide CUDA installation.
 
-Depth Adaptive QEM appears as **Depth Adaptive QEM (GPU / Higher Quality)** in the algorithm list.
-When compatible NVIDIA hardware or its driver is unavailable, the entry is muted and selecting it
-explains the hardware requirement. Fast QEM remains the default, and every other built-in algorithm
-continues to work. The first use prepares and caches kernels for the detected GPU and backend; that
-setup does not repeat for every mesh. Broader fixtures and independent reproduction remain part of
-continued validation.
+The algorithm list places **Depth + Density Adaptive QEM (GPU / Best)** first, followed by
+**Depth Adaptive QEM (GPU / Faster)**, Density balanced, Fast QEM, and the remaining methods.
+Depth + Density Adaptive QEM is selected by default when the configured GPU backend is available.
+Density balanced is selected otherwise. Unavailable GPU entries are muted, and selecting one
+explains the hardware requirement. The first GPU-guided use prepares and caches kernels for the
+detected GPU and backend; that setup does not repeat for every mesh.
 
 ## Processing path
 
@@ -269,7 +269,7 @@ triangles, one resident indexed mesh, and identical quality measurements.
 | Fast QEM | **9.827 s** | 1.1721 mm | 2.3504 mm | 0.6987 mm | 0.3993% | Production baseline |
 | Density balanced | 11.439 s | 1.2041 mm | 2.4341 mm | 0.0030 mm | **0.0405%** | Production |
 | Shape preserving | 56.404 s | 1.1933 mm | 2.3323 mm | **0.0009 mm** | 0.0491% | Production |
-| Depth Adaptive QEM | 10.156 s | **1.0668 mm** | **2.0586 mm** | 0.0234 mm | 0.1241% | GPU / Higher Quality option |
+| Depth Adaptive QEM | 10.156 s | **1.0668 mm** | **2.0586 mm** | 0.0234 mm | 0.1241% | GPU / Faster option |
 
 Compared with Fast QEM, Depth Adaptive QEM improved sampled RMS by 9.0%, P95 by 12.4%, maximum drift by
 96.7%, and surface-area error by 68.9%. It was 0.329 seconds, or 3.3%, slower. Three complete
