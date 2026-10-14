@@ -11,17 +11,21 @@ import os
 import shutil
 import struct
 import threading
+from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 from pathlib import Path
 
+import fast_simplification
 import numpy as np
 
 INDEX_VERSION = 1
 STL_RECORD_BYTES = 50
 STL_HEADER_BYTES = 84
+MAX_OPEN_TILE_FILES = 64
+ESTIMATED_OPTIMIZATION_BYTES_PER_TRIANGLE = 320
 TRIANGLE_RECORD_DTYPE = np.dtype(
     [("normal", "<f4", (3,)), ("vertices", "<f4", (3, 3)), ("attribute", "<u2")]
 )
@@ -77,6 +81,14 @@ def source_fingerprint(path: Path, sample_bytes: int = 1 << 20) -> str:
     return digest.hexdigest()
 
 
+def file_sha256(path: Path, block_bytes: int = 8 * 1024**2) -> str:
+    digest = sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(block_bytes):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def default_index_directory(source: Path) -> Path:
     """Return a private, stable cache path without exposing the source filename."""
     cache_root = (
@@ -85,6 +97,16 @@ def default_index_directory(source: Path) -> Path:
     normalized_source = os.path.normcase(os.fspath(source.resolve())).encode("utf-8")
     source_key = sha256(normalized_source).hexdigest()[:24]
     return cache_root / f"{source_key}.meshmill-index"
+
+
+def _require_disk_space(directory: Path, required_bytes: int, operation: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    free = shutil.disk_usage(directory).free
+    if free < required_bytes:
+        raise OSError(
+            f"{operation} needs about {required_bytes / 1024**3:.2f} GB of free space, "
+            f"but only {free / 1024**3:.2f} GB is available."
+        )
 
 
 def _cancelled(cancel_event: threading.Event | None) -> None:
@@ -378,6 +400,11 @@ def build_index(
     """
     source = source.resolve()
     triangle_count = binary_stl_count(source)
+    _require_disk_space(
+        index_directory.parent,
+        source.stat().st_size + max(64 * 1024**2, source.stat().st_size // 20),
+        "Tiled indexing",
+    )
     target_triangles_per_tile = max(65_536, int(target_triangles_per_tile))
     block_triangles = max(16_384, int(block_triangles))
     records = np.memmap(
@@ -430,7 +457,7 @@ def build_index(
         stale.unlink()
 
     counts: dict[tuple[int, int], int] = {}
-    handles: dict[tuple[int, int], object] = {}
+    handles: OrderedDict[tuple[int, int], object] = OrderedDict()
     try:
         for start in range(0, triangle_count, block_triangles):
             _cancelled(cancel_event)
@@ -449,8 +476,14 @@ def build_index(
                 key = (level, code)
                 handle = handles.get(key)
                 if handle is None:
+                    if len(handles) >= MAX_OPEN_TILE_FILES:
+                        _old_key, old_handle = handles.popitem(last=False)
+                        old_handle.flush()
+                        old_handle.close()
                     handle = (staging / f"tile-L{level:02d}-{code:016x}.bin").open("ab")
                     handles[key] = handle
+                else:
+                    handles.move_to_end(key)
                 payload = np.ascontiguousarray(chunk[group]).view(np.uint8)
                 handle.write(payload.tobytes())
                 counts[key] = counts.get(key, 0) + len(group)
@@ -535,3 +568,419 @@ def index_matches(source: Path, manifest: IndexManifest) -> bool:
         and manifest.source_mtime_ns == stat.st_mtime_ns
         and manifest.source_fingerprint == source_fingerprint(source)
     )
+
+
+def load_tile_mesh(index_directory: Path, tile: TileRecord) -> tuple[np.ndarray, np.ndarray]:
+    """Load one indexed STL tile and weld identical source coordinates within that tile."""
+    records = np.memmap(
+        index_directory / tile.relative_path,
+        dtype=TRIANGLE_RECORD_DTYPE,
+        mode="r",
+        shape=(tile.triangle_count,),
+    )
+    triangle_vertices = np.ascontiguousarray(records["vertices"].reshape(-1, 3))
+    del records
+    points, inverse = np.unique(triangle_vertices, axis=0, return_inverse=True)
+    faces = np.ascontiguousarray(inverse.reshape(-1, 3), dtype=np.int32)
+    return np.ascontiguousarray(points, dtype=np.float64), faces
+
+
+def boundary_vertex_mask(vertex_count: int, faces: np.ndarray) -> np.ndarray:
+    """Return vertices on edges owned by only one triangle in the current tile."""
+    edges = np.sort(
+        np.vstack((faces[:, (0, 1)], faces[:, (1, 2)], faces[:, (2, 0)])), axis=1
+    )
+    unique_edges, counts = np.unique(edges, axis=0, return_counts=True)
+    mask = np.zeros(vertex_count, dtype=bool)
+    mask[np.unique(unique_edges[counts == 1])] = True
+    return mask
+
+
+def missing_protected_vertices(
+    source_points: np.ndarray, protected: np.ndarray, output_points: np.ndarray
+) -> int:
+    """Count protected float32 coordinates absent from a tile result."""
+    source = np.ascontiguousarray(source_points[protected], dtype=np.float32)
+    output = np.ascontiguousarray(output_points, dtype=np.float32)
+    if not len(source):
+        return 0
+    coordinate_key = np.dtype((np.void, source.dtype.itemsize * 3))
+    source_keys = source.view(coordinate_key).ravel()
+    output_keys = output.view(coordinate_key).ravel()
+    return int(np.count_nonzero(~np.isin(source_keys, output_keys)))
+
+
+def _write_binary_stl(
+    path: Path,
+    tile_results: list[tuple[Path, int]],
+    cancel_event: threading.Event | None = None,
+    progress_callback: Callable[[str, int, int], None] | None = None,
+) -> None:
+    triangle_count = sum(count for _path, count in tile_results)
+    temporary = path.with_name(path.name + ".partial")
+    try:
+        with temporary.open("wb") as stream:
+            header = b"MeshMill tiled optimization"
+            stream.write(header.ljust(80, b"\0"))
+            stream.write(struct.pack("<I", triangle_count))
+            for index, (result_path, expected_count) in enumerate(tile_results, start=1):
+                _cancelled(cancel_event)
+                with np.load(result_path, allow_pickle=False) as payload:
+                    points = payload["points"]
+                    faces = payload["faces"]
+                if len(faces) != expected_count:
+                    raise RuntimeError("A tiled result changed after validation.")
+                triangles = points[faces].astype("<f4", copy=False)
+                cross = np.cross(
+                    triangles[:, 1] - triangles[:, 0],
+                    triangles[:, 2] - triangles[:, 0],
+                )
+                lengths = np.linalg.norm(cross, axis=1)
+                normals = np.zeros_like(cross, dtype="<f4")
+                valid = lengths > 1e-20
+                normals[valid] = cross[valid] / lengths[valid, None]
+                records = np.empty(len(faces), dtype=TRIANGLE_RECORD_DTYPE)
+                records["normal"] = normals
+                records["vertices"] = triangles
+                records["attribute"] = 0
+                stream.write(records.tobytes())
+                _progress(progress_callback, "assembling", index, len(tile_results))
+            stream.flush()
+            os.fsync(stream.fileno())
+        _cancelled(cancel_event)
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def allocate_tile_targets(tiles: tuple[TileRecord, ...], target: int) -> list[int]:
+    """Allocate an exact global target deterministically with a four-face tile floor."""
+    minimums = np.asarray([min(4, tile.triangle_count) for tile in tiles], dtype=np.int64)
+    minimum_total = int(minimums.sum())
+    if target < minimum_total:
+        raise ValueError(
+            f"The requested target is below the tiled minimum of {minimum_total:,} triangles."
+        )
+    counts = np.asarray([tile.triangle_count for tile in tiles], dtype=np.int64)
+    capacity = counts - minimums
+    remaining = target - minimum_total
+    if remaining <= 0 or int(capacity.sum()) == 0:
+        return minimums.tolist()
+    shares = remaining * capacity.astype(np.float64) / float(capacity.sum())
+    additions = np.minimum(capacity, np.floor(shares).astype(np.int64))
+    unresolved = remaining - int(additions.sum())
+    fractions = shares - additions
+    order = np.lexsort((np.arange(len(tiles)), -fractions))
+    for index in order:
+        if unresolved <= 0:
+            break
+        available = int(capacity[index] - additions[index])
+        if available <= 0:
+            continue
+        grant = min(available, unresolved)
+        additions[index] += grant
+        unresolved -= grant
+    allocated = minimums + additions
+    if int(allocated.sum()) != target or np.any(allocated > counts):
+        raise RuntimeError("Tiled target allocation failed its count contract.")
+    return allocated.tolist()
+
+
+def _tile_result_count(path: Path, source_count: int) -> int | None:
+    try:
+        with np.load(path, allow_pickle=False) as payload:
+            points = payload["points"]
+            faces = payload["faces"]
+            checksum = str(payload["checksum"].item())
+        digest = sha256(points.tobytes() + faces.tobytes()).hexdigest()
+        valid = (
+            1 <= len(faces) <= source_count
+            and faces.ndim == 2
+            and faces.shape[1] == 3
+            and len(points) > 0
+            and int(faces.max(initial=-1)) < len(points)
+            and checksum == digest
+        )
+        return len(faces) if valid else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _tile_result_valid(path: Path, source_count: int) -> bool:
+    return _tile_result_count(path, source_count) is not None
+
+
+def _save_tile_result(path: Path, points: np.ndarray, faces: np.ndarray) -> None:
+    points = np.ascontiguousarray(points, dtype=np.float32)
+    faces = np.ascontiguousarray(faces, dtype=np.int32)
+    checksum = sha256(points.tobytes() + faces.tobytes()).hexdigest()
+    temporary = path.with_name(path.name + ".partial")
+    with temporary.open("wb") as stream:
+        np.savez(stream, points=points, faces=faces, checksum=np.asarray(checksum))
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
+def _write_run_manifest(path: Path, payload: dict) -> None:
+    temporary = path.with_name(path.name + ".partial")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _optimize_tile(
+    index_directory: str,
+    tile: TileRecord,
+    tile_number: int,
+    tile_target: int,
+    run_directory: str,
+    aggressiveness: float,
+    algorithm: str,
+    gpu_preference: str,
+) -> tuple[int, int, int, str]:
+    index_path = Path(index_directory)
+    result_path = Path(run_directory) / f"tile-{tile_number:08d}.npz"
+    points, faces = load_tile_mesh(index_path, tile)
+    protected_vertices = boundary_vertex_mask(len(points), faces)
+    if tile_target < len(faces):
+        if algorithm.startswith("Depth + Density Adaptive QEM"):
+            from depth_adaptive_qem import simplify_depth_density_adaptive_qem
+
+            output_points, output_faces, _report = simplify_depth_density_adaptive_qem(
+                points,
+                faces,
+                tile_target,
+                aggressiveness,
+                gpu_preference,
+                protected_vertices=protected_vertices,
+            )
+        elif algorithm.startswith("Depth Adaptive QEM"):
+            from depth_adaptive_qem import simplify_depth_adaptive_qem
+
+            output_points, output_faces, _report = simplify_depth_adaptive_qem(
+                points,
+                faces,
+                tile_target,
+                aggressiveness,
+                gpu_preference,
+                protected_vertices=protected_vertices,
+            )
+        else:
+            effective_aggressiveness = (
+                min(5.0, max(0.0, aggressiveness * 0.70))
+                if algorithm == "Density balanced"
+                else aggressiveness
+            )
+            output_points, output_faces = fast_simplification.simplify(
+                points,
+                faces,
+                target_count=tile_target,
+                agg=effective_aggressiveness,
+                verbose=False,
+                preserve_border=True,
+            )
+    else:
+        output_points, output_faces = points, faces
+    if not 1 <= len(output_faces) <= tile.triangle_count:
+        raise RuntimeError(
+            f"Tile {tile_number} produced {len(output_faces):,} triangles from "
+            f"{tile.triangle_count:,}."
+        )
+    missing_boundary_vertices = missing_protected_vertices(
+        points, protected_vertices, output_points
+    )
+    if missing_boundary_vertices:
+        raise RuntimeError(
+            f"Tile {tile_number} changed {missing_boundary_vertices} protected boundary "
+            "vertices. The tiled result was not assembled."
+        )
+    _save_tile_result(result_path, output_points, output_faces)
+    if not _tile_result_valid(result_path, tile.triangle_count):
+        raise RuntimeError(f"Tile {tile_number} failed result validation.")
+    return tile_number, tile.triangle_count, len(output_faces), os.fspath(result_path)
+
+
+def optimize_indexed_mesh(
+    index_directory: Path,
+    output_path: Path,
+    target_triangles: int,
+    *,
+    aggressiveness: float = 7.0,
+    algorithm: str = "Fast QEM",
+    gpu_preference: str = "system",
+    workers: int | None = None,
+    parallel_gpu_workers: bool = False,
+    memory_budget_bytes: int | None = None,
+    cancel_event: threading.Event | None = None,
+    progress_callback: Callable[[str, int, int], None] | None = None,
+) -> dict[str, int]:
+    """Optimize indexed tiles within bounded memory and assemble a binary STL incrementally.
+
+    Exact source coordinates on tile borders are protected by Fast QEM's boundary preservation.
+    STL assembly remains triangle-soup based, so it does not require a global vertex array.
+    """
+    manifest = load_manifest(index_directory)
+    target_triangles = max(4, min(int(target_triangles), manifest.triangle_count))
+    estimated_result_bytes = target_triangles * (STL_RECORD_BYTES + 48)
+    _require_disk_space(
+        output_path.parent,
+        estimated_result_bytes + max(64 * 1024**2, estimated_result_bytes // 10),
+        "Tiled optimization",
+    )
+    tile_targets = allocate_tile_targets(manifest.tiles, target_triangles)
+    work_directory = index_directory / "results"
+    work_directory.mkdir(exist_ok=True)
+    run_key = sha256(
+        json.dumps(
+            {
+                "index": manifest.source_fingerprint,
+                "target": target_triangles,
+                "algorithm": algorithm,
+                "aggressiveness": aggressiveness,
+                "gpu": gpu_preference,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    run_directory = work_directory / run_key
+    run_directory.mkdir(exist_ok=True)
+    for partial in run_directory.glob("*.partial"):
+        partial.unlink()
+    results_by_tile: dict[int, tuple[Path, int]] = {}
+    run_manifest_path = run_directory / "run.json"
+    run_manifest = {
+        "format": 1,
+        "source_fingerprint": manifest.source_fingerprint,
+        "source_triangles": manifest.triangle_count,
+        "target_triangles": target_triangles,
+        "algorithm": algorithm,
+        "aggressiveness": aggressiveness,
+        "gpu_preference": gpu_preference,
+        "complete": False,
+        "tiles": [],
+    }
+    processed = 0
+    cached_tiles = 0
+    pending: list[tuple[int, TileRecord, int]] = []
+    for tile_number, (tile, tile_target) in enumerate(
+        zip(manifest.tiles, tile_targets, strict=True), start=1
+    ):
+        _cancelled(cancel_event)
+        result_path = run_directory / f"tile-{tile_number:08d}.npz"
+        cached_count = _tile_result_count(result_path, tile.triangle_count)
+        if cached_count is not None:
+            results_by_tile[tile_number] = (result_path, cached_count)
+            processed += tile.triangle_count
+            cached_tiles += 1
+            _progress(
+                progress_callback,
+                "optimizing tiles",
+                processed,
+                manifest.triangle_count,
+            )
+            continue
+        pending.append((tile_number, tile, tile_target))
+
+    def checkpoint() -> None:
+        run_manifest["tiles"] = [
+            {
+                "number": number,
+                "target_triangles": tile_targets[number - 1],
+                "output_triangles": count,
+                "result": result_path.name,
+            }
+            for number, (result_path, count) in sorted(results_by_tile.items())
+        ]
+        _write_run_manifest(run_manifest_path, run_manifest)
+
+    checkpoint()
+
+    gpu_algorithm = algorithm.startswith("Depth ")
+    if workers is None:
+        workers = min(8, max(1, (os.cpu_count() or 2) // 2), max(1, len(pending)))
+    workers = (
+        1
+        if gpu_algorithm and not parallel_gpu_workers
+        else max(1, min(int(workers), max(1, len(pending))))
+    )
+    if memory_budget_bytes is not None and pending:
+        largest_tile = max(tile.triangle_count for _number, tile, _target in pending)
+        per_worker = max(
+            64 * 1024**2,
+            largest_tile * ESTIMATED_OPTIMIZATION_BYTES_PER_TRIANGLE,
+        )
+        workers = min(workers, max(1, int(memory_budget_bytes) // per_worker))
+
+    if workers == 1:
+        completed_results = (
+            _optimize_tile(
+                os.fspath(index_directory),
+                tile,
+                tile_number,
+                tile_target,
+                os.fspath(run_directory),
+                aggressiveness,
+                algorithm,
+                gpu_preference,
+            )
+            for tile_number, tile, tile_target in pending
+        )
+        for tile_number, source_count, output_count, result_path in completed_results:
+            _cancelled(cancel_event)
+            results_by_tile[tile_number] = (Path(result_path), output_count)
+            processed += source_count
+            checkpoint()
+            _progress(progress_callback, "optimizing tiles", processed, manifest.triangle_count)
+    elif pending:
+        executor = ProcessPoolExecutor(max_workers=workers)
+        futures = [
+            executor.submit(
+                _optimize_tile,
+                os.fspath(index_directory),
+                tile,
+                tile_number,
+                tile_target,
+                os.fspath(run_directory),
+                aggressiveness,
+                algorithm,
+                gpu_preference,
+            )
+            for tile_number, tile, tile_target in pending
+        ]
+        try:
+            for future in as_completed(futures):
+                _cancelled(cancel_event)
+                tile_number, source_count, output_count, result_path = future.result()
+                results_by_tile[tile_number] = (Path(result_path), output_count)
+                processed += source_count
+                checkpoint()
+                _progress(
+                    progress_callback, "optimizing tiles", processed, manifest.triangle_count
+                )
+        except Exception:
+            for future in futures:
+                future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
+    _cancelled(cancel_event)
+    results = [results_by_tile[index] for index in range(1, len(manifest.tiles) + 1)]
+    output_triangle_count = sum(count for _path, count in results)
+    _progress(progress_callback, "assembling", 0, len(results))
+    _write_binary_stl(output_path, results, cancel_event, progress_callback)
+    if binary_stl_count(output_path) != output_triangle_count:
+        raise RuntimeError("Assembled STL count does not match the validated tile results.")
+    run_manifest["complete"] = True
+    run_manifest["output_triangles"] = output_triangle_count
+    run_manifest["output_sha256"] = file_sha256(output_path)
+    checkpoint()
+    return {
+        "source_triangles": manifest.triangle_count,
+        "target_triangles": target_triangles,
+        "output_triangles": output_triangle_count,
+        "tile_count": len(results),
+        "cached_tiles": cached_tiles,
+        "workers": workers,
+    }

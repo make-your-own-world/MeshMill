@@ -1,0 +1,80 @@
+[
+  {
+    "alpha": 0.0,
+    "extrema_maximum_change": 0.0,
+    "signed_area_percent": 0.11880963589065985,
+    "quality": {
+      "reduction_percent": 93.94132537142706,
+      "rms_percent": 0.09714767408244314,
+      "p95_percent": 0.17494037927339562,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 0.11880963589065985,
+      "nonmanifold_percent": 0.0124
+    }
+  },
+  {
+    "alpha": 0.001,
+    "extrema_maximum_change": 0.0008774414062600044,
+    "signed_area_percent": 0.11568966094288591,
+    "quality": {
+      "reduction_percent": 93.94132537142706,
+      "rms_percent": 0.09714108486911709,
+      "p95_percent": 0.17493243598832425,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 0.11568966094288591,
+      "nonmanifold_percent": 0.0124
+    }
+  },
+  {
+    "alpha": 0.002,
+    "extrema_maximum_change": 0.0017548828125200089,
+    "signed_area_percent": 0.11257060318752288,
+    "quality": {
+      "reduction_percent": 93.94132537142706,
+      "rms_percent": 0.09713449836260665,
+      "p95_percent": 0.17492930280671057,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 0.11257060318752288,
+      "nonmanifold_percent": 0.0124
+    }
+  },
+  {
+    "alpha": 0.005,
+    "extrema_maximum_change": 0.004387207031243179,
+    "signed_area_percent": 0.1032186439482441,
+    "quality": {
+      "reduction_percent": 93.94132537142706,
+      "rms_percent": 0.09711478431585849,
+      "p95_percent": 0.17489282316972354,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 0.1032186439482441,
+      "nonmanifold_percent": 0.0124
+    }
+  },
+  {
+    "alpha": 0.01,
+    "extrema_maximum_change": 0.008774414062486358,
+    "signed_area_percent": 0.08764840220014669,
+    "quality": {
+      "reduction_percent": 93.94132537142706,
+      "rms_percent": 0.09708209258880629,
+      "p95_percent": 0.17480260463386,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 0.08764840220014669,
+      "nonmanifold_percent": 0.0124
+    }
+  },
+  {
+    "alpha": 0.02,
+    "extrema_maximum_change": 0.017548828124972715,
+    "signed_area_percent": 0.05656507766944596,
+    "quality": {
+      "reduction_percent": 93.94132537142706,
+      "rms_percent": 0.09701715130112291,
+      "p95_percent": 0.1747129996573946,
+      "drift_percent": 1.482410019194245e-06,
+      "area_percent": 0.05656507766944596,
+      "nonmanifold_percent": 0.0124
+    }
+  }
+]

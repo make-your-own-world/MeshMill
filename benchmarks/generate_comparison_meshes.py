@@ -17,7 +17,7 @@ ALGORITHMS = (
     ("Density balanced", "meshmill-current-density.stl"),
     ("Shape preserving", "meshmill-current-shape.stl"),
     ("Preserve topology", "meshmill-current-topology.stl"),
-    ("Depth Adaptive QEM (GPU / Higher Quality)", "meshmill-depth-adaptive-qem.stl"),
+    ("Depth Adaptive QEM (GPU / Faster)", "meshmill-depth-adaptive-qem.stl"),
 )
 
 

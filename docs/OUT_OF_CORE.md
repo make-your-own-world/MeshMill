@@ -1,20 +1,18 @@
 # Out-of-core mesh architecture
 
-MeshMill's current large-file safeguard estimates working memory before allocating a complete
-mesh. Files that exceed the configured budget can open as bounded navigation overviews. An
-overview is sampled geometry, is visibly identified as such, and cannot be edited or exported as
-though it were the complete source.
-
-True zoom-dependent detail requires a persistent spatial index. The design below defines that
-next implementation phase.
+MeshMill estimates working memory before allocating a complete mesh. Files that exceed the
+configured budget can open as bounded navigation overviews or use full-resolution tiled
+processing. An overview is sampled geometry, is visibly identified as such, and cannot be edited
+or exported as though it were the complete source. Tiled processing uses a persistent spatial
+index and streamed assembly. Zoom-dependent full-resolution viewport detail remains planned.
 
 ## Index format
 
 The version 1 implementation gives each binary STL source a private, versioned `.meshmill-index`
 cache directory containing:
 
-- `manifest.json`, with the source size, modification time, sampled content hashes, bounds,
-  triangle count, index version, coordinate precision, and level descriptions;
+- `manifest.json`, with the source size, modification time, bounded content fingerprint, bounds,
+  triangle count, index version, tile target, and adaptive leaf records;
 - adaptive spatial tiles addressed by octree level and Morton code;
 - full-resolution triangle records in leaf tiles; and
 - an atomically published manifest with adaptive leaf metadata.
@@ -25,7 +23,8 @@ boundary ownership and overlap metadata without changing existing source files.
 Index creation reads the source sequentially in bounded blocks. Dense octree leaves subdivide until
 they fit the configured work-unit target; sparse leaves remain coarse. This avoids forcing every
 part of an irregular scan to the resolution required by its densest region. It writes temporary
-tile runs and atomically publishes the manifest after every required file passes validation. An
+tile files and atomically publishes the manifest after every required file passes validation. No
+more than 64 tile files remain open at once. An
 interrupted or stale index is detected from source metadata and bounded content hashes. The last
 complete index remains active until its replacement is published.
 
@@ -47,14 +46,15 @@ progress. Cancellation removes partial results and leaves the last complete repr
 
 ## Processing and capacity
 
-A local work unit is a tile plus the deterministic overlap required by its operation. Concurrency
-is capped by currently available RAM, configured memory percentage, logical processor count, and
-measured work-unit size. GPU upload and display have a separate VRAM budget. Reported parallel
-capacity is an estimate until representative tiles have been measured.
+A local work unit is one adaptive tile. Concurrency is capped by configured memory percentage,
+logical processor count, and a conservative estimate derived from the largest pending tile. GPU
+algorithms currently use one tile worker to avoid device contention. GPU upload and display have a
+separate VRAM budget.
 
-Operations retain one owner for every boundary element. Assembly validates shared boundaries,
-removes duplicates, checks counts and bounds, and records the exact parameters used. The same work
-unit and result format can later be scheduled across distributed synthesis nodes.
+Operations preserve vertices on every tile-open edge. Each checkpoint records a checksum and is
+validated before reuse. Assembly streams results in deterministic tile order, checks its exact
+triangle count, and records the parameters and output checksum in an atomic run manifest. The same
+work-unit model can later be scheduled across distributed synthesis nodes.
 
 ## CPU, GPU, and resident geometry
 

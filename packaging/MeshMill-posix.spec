@@ -14,12 +14,14 @@ a = Analysis(
     datas=[
         (os.path.join(project_root, "LICENSE"), "."),
         (os.path.join(project_root, "README.md"), "."),
+        (os.path.join(project_root, "CHANGELOG.md"), "."),
         (os.path.join(project_root, "ROADMAP.md"), "."),
         (os.path.join(project_root, "THIRD_PARTY_NOTICES.md"), "."),
         (os.path.join(project_root, "docs", "OUT_OF_CORE.md"), "docs"),
         (os.path.join(project_root, "docs", "PLATFORM_TESTING.md"), "docs"),
         (os.path.join(project_root, "assets", "meshmill-mark.svg"), "assets"),
         (os.path.join(project_root, "assets", "meshmill-logo.svg"), "assets"),
+        (os.path.join(project_root, "assets", "support-profile.webp"), "assets"),
         (os.path.join(project_root, "locales"), "locales"),
     ],
     hiddenimports=[
@@ -52,8 +54,26 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+cli = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="MeshMillCLI",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
 coll = COLLECT(
     exe,
+    cli,
     a.binaries,
     a.datas,
     strip=False,
