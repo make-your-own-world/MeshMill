@@ -3,7 +3,7 @@
 </p>
 
 <!-- localization-navigation:start -->
-> **0.2.0 localization status:** The current application and documentation release is English-only.
+> **0.3.0 localization status:** The current application and documentation release is English-only.
 > Updated translations were deferred because translation, structural validation, and review exceeded
 > the resources and processing capacity available for this release. The links below lead to older
 > community translation work and may not describe current features.
