@@ -9,7 +9,6 @@ GitHub द्वारा होस्ट किए गए धावक। अ�
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py
-python tools/release_privacy_check.py
 ```
 
 ## पहली सार्वजनिक रिलीज़ से पहले

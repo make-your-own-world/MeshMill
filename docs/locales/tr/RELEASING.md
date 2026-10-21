@@ -9,7 +9,6 @@ Yerelleştirme kaynak kataloglarını oluşturmadan önce yenileyin ve doğrulay
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py
-python tools/release_privacy_check.py
 ```
 
 ## İlk halka açıklanmadan önce

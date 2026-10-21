@@ -9,7 +9,6 @@ Before building, refresh and validate the localization source catalogs:
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py --source-only
-python tools/release_privacy_check.py
 ```
 
 ## Before the first public release
@@ -20,12 +19,8 @@ python tools/release_privacy_check.py
 2. Review the GPL and third-party notices.
 3. Test installation, launch, STL loading, optimization, export, and uninstallation on a clean
    Windows account or virtual machine.
-4. Run CI against `samples/sample-scan.stl`. Inspect every documentation screenshot and crop out
-   the taskbar, window chrome that is not part of MeshMill, notifications, private paths, account
-   details, and unrelated desktop content before publishing.
-5. Configure the repository-local Git author with the account's GitHub no-reply address before the
-   first commit. Confirm it with `git config --local --get user.email`.
-6. Configure optional Authenticode signing secrets:
+4. Run CI against `samples/sample-scan.stl`.
+5. Configure optional Authenticode signing secrets:
    - `WINDOWS_CERTIFICATE_BASE64`: Base64-encoded PFX certificate.
    - `WINDOWS_CERTIFICATE_PASSWORD`: PFX password.
 

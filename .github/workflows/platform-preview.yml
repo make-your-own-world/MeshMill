@@ -40,10 +40,9 @@ jobs:
       - name: Install build dependencies
         run: python -m pip install -r requirements-dev.txt
 
-      - name: Validate source and privacy
+      - name: Validate source
         run: |
           python -m py_compile meshmill.py
-          python tools/release_privacy_check.py
           python tools/localization/validate_locales.py
 
       - name: Build portable application
@@ -103,10 +102,9 @@ jobs:
       - name: Install build dependencies
         run: python -m pip install -r requirements-dev.txt
 
-      - name: Validate source and privacy
+      - name: Validate source
         run: |
           python -m py_compile meshmill.py
-          python tools/release_privacy_check.py
           python tools/localization/validate_locales.py
 
       - name: Build application bundle

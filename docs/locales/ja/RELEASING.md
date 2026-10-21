@@ -9,7 +9,6 @@ GitHub でホストされているランナー。エンド ユーザーは、Pyt
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py
-python tools/release_privacy_check.py
 ```
 
 ## 初公開前に

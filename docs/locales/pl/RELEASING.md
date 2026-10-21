@@ -9,7 +9,6 @@ Przed budowaniem odśwież i sprawdź katalogi źródłowe lokalizacji:
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py
-python tools/release_privacy_check.py
 ```
 
 ## Przed pierwszym publicznym wydaniem

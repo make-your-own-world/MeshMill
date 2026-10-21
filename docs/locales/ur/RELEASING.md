@@ -9,7 +9,6 @@ GitHub کی میزبانی کرنے والے رنرز۔ آخری صارفین Py
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py
-python tools/release_privacy_check.py
 ```
 
 ## پہلی عوامی ریلیز سے پہلے

@@ -1,4 +1,4 @@
-"""Create a ZIP archive without leaking source-file timestamps."""
+"""Create a deterministic ZIP archive."""
 
 from __future__ import annotations
 

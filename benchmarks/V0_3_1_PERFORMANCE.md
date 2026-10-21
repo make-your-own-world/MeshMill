@@ -105,9 +105,3 @@ Repeated measurements of immutable source bounds during surface finishing and di
 preparation are candidates for further low-risk investigation. They are not additional completed
 optimizations in this comparison. Changing STL welding or QEM ordering would require separate
 geometry-equivalence testing.
-
-The Windows candidate passed packaged GUI loading, reduction, and Density result-display checks
-and a packaged CLI export check. Isolated installer identities exercised the 0.3.0 payload upgraded
-to 0.3.1, including settings and shortcut preservation, obsolete-file removal, requested STL reopen,
-and uninstall. This leaves the existing installation untouched. Broader packaged workflow and
-cross-platform verification remain separate release checks.

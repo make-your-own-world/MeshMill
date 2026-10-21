@@ -9,7 +9,6 @@ Voordat u de lokalisatiebroncatalogi gaat bouwen, moet u deze vernieuwen en vali
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py
-python tools/release_privacy_check.py
 ```
 
 ## Vóór de eerste publieke release

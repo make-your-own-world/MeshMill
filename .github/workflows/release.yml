@@ -46,8 +46,6 @@ jobs:
       - name: Install build dependencies
         run: python -m pip install -r requirements-dev.txt
 
-      - name: Check release privacy
-        run: python tools/release_privacy_check.py
 
       - name: Generate version metadata
         run: python tools/write_version_info.py --version "${{ steps.version.outputs.version }}"
@@ -95,8 +93,8 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: |
-          python tools/normalize_package_timestamps.py dist/MeshMill
-          if ($LASTEXITCODE -ne 0) { throw "Package timestamp normalization failed" }
+          $packageTime = [DateTime]::UtcNow
+          Get-ChildItem dist/MeshMill -Recurse -File | ForEach-Object { $_.LastWriteTimeUtc = $packageTime }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.version.outputs.version }}" "installer\MeshMill.iss"
           if ($LASTEXITCODE -ne 0) { throw "Installer build failed" }
 

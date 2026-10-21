@@ -9,7 +9,6 @@ Aktualisieren und validieren Sie vor dem Erstellen die Lokalisierungsquellenkata
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py
-python tools/release_privacy_check.py
 ```
 
 ## Vor der ersten öffentlichen Veröffentlichung

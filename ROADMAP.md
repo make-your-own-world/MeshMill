@@ -25,8 +25,6 @@ Released features are documented in the [changelog](CHANGELOG.md).
 - [x] Add unified window controls, F11 fullscreen, and setting-name Preferences filtering.
 - [x] Correct theme contrast, changelog scrolling, toolbox margins, and button sizing.
 - [x] Add per-user STL Open with registration while preserving the default handler.
-- [ ] Verify rebuilt GUI and CLI packages and install, upgrade, and uninstall behavior.
-- [ ] Complete final release review using the [release checklist](docs/RELEASE_CHECKLIST.md).
 - [ ] Complete and validate current application and documentation translations, with native-speaker
   review and corrections.
 

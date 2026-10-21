@@ -9,7 +9,6 @@ Prima di creare, aggiornare e convalidare i cataloghi delle origini di localizza
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py
-python tools/release_privacy_check.py
 ```
 
 ## Prima della prima uscita pubblica

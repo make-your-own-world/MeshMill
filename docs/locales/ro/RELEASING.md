@@ -9,7 +9,6 @@ alergători găzduiți de GitHub. Utilizatorii finali nu instalează Python, Nod
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py
-python tools/release_privacy_check.py
 ```
 
 ## Înainte de prima lansare publică

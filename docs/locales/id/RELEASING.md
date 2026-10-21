@@ -9,7 +9,6 @@ Sebelum membuat, segarkan dan validasi katalog sumber pelokalan:
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py
-python tools/release_privacy_check.py
 ```
 
 ## Sebelum rilis publik pertama

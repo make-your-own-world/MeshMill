@@ -9,7 +9,6 @@ GitHub 托管的运行器。最终用户不安装 Python、Node.js 或依赖项�
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py
-python tools/release_privacy_check.py
 ```
 
 ## 在第一次公开发布之前

@@ -9,7 +9,6 @@ Avant de créer, actualisez et validez les catalogues sources de localisation :
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py
-python tools/release_privacy_check.py
 ```
 
 ## Avant la première sortie publique

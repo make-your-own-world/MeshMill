@@ -9,7 +9,6 @@ Sula ndéantar na catalóga foinse logánaithe a thógáil, a athnuachan agus a 
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py
-python tools/release_privacy_check.py
 ```
 
 ## Roimh an chéad eisiúint poiblí

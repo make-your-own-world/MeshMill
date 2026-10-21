@@ -9,7 +9,6 @@ Trước khi xây dựng, hãy làm mới và xác thực danh mục nguồn b�
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py
-python tools/release_privacy_check.py
 ```
 
 ## Trước khi phát hành ra công chúng lần đầu tiên

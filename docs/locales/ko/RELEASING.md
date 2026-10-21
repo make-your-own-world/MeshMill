@@ -9,7 +9,6 @@ GitHub에서 호스팅되는 실행기. 최종 사용자는 Python, Node.js 또�
 ```powershell
 python tools/localization/extract_ui_catalog.py
 python tools/localization/validate_locales.py
-python tools/release_privacy_check.py
 ```
 
 ## 첫 공개 전
