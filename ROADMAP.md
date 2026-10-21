@@ -1,6 +1,6 @@
 # MeshMill roadmap
 
-This roadmap tracks work after 0.3.1. Checked items are completed.
+This roadmap tracks work through 0.3.3 and planned additions. Checked items are completed.
 Released features are documented in the [changelog](CHANGELOG.md).
 
 ## Maintenance (0.3.1)
@@ -27,6 +27,17 @@ Released features are documented in the [changelog](CHANGELOG.md).
 - [x] Add per-user STL Open with registration while preserving the default handler.
 - [ ] Complete and validate current application and documentation translations, with native-speaker
   review and corrections.
+
+## Maintenance (0.3.2–0.3.3)
+
+- [x] Contain optimization workers and recover verified older orphans on startup.
+- [x] Make meshes interactive while GPU initialization continues in the background.
+- [x] Reuse target-independent probe measurements without changing reduction calculations.
+- [x] Keep standard-view framing, display-mode switching, and Reload Original consistent.
+- [x] Compress older metrics history after the full-resolution graph fills.
+- [x] Add configurable opening folders and an explicit Windows default-app preference.
+- [x] Add optional update installation with patch-only or all-release scope, off by default.
+- [x] Refine Preferences layout and theme terminology.
 
 ## Distributed tile processing
 

@@ -6,13 +6,143 @@ integration points here, covered by real subprocess lifecycle tests.
 
 from __future__ import annotations
 
+import ast
 import ctypes
+import json
 import multiprocessing
 import os
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from multiprocessing.connection import wait as wait_handles
+from pathlib import Path
+
+
+def _spawn_owner(command: str) -> int | None:
+    """Read multiprocessing's parent argument without executing its command."""
+    if "--multiprocessing-fork" not in command:
+        return None
+    start = command.find("spawn_main(")
+    if start >= 0:
+        end = command.find(")", start)
+        try:
+            call = ast.parse(command[start:end + 1], mode="eval").body
+            for keyword in call.keywords:
+                if keyword.arg == "parent_pid" and isinstance(keyword.value, ast.Constant):
+                    value = keyword.value.value
+                    return value if type(value) is int and value > 0 else None
+        except (SyntaxError, AttributeError):
+            return None
+    for argument in command.split():
+        if argument.startswith("parent_pid="):
+            value = argument.partition("=")[2].strip('"')
+            return int(value) if value.isdecimal() and int(value) > 0 else None
+    return None
+
+
+def _owned_orphan_candidate(record, roots) -> bool:
+    owner = _spawn_owner(record.get("command") or "")
+    if owner is None or owner != record.get("parent"):
+        return False
+    roots = [Path(root).resolve() for root in roots]
+    image = Path(record.get("image") or "").resolve()
+    if image.name.lower() in ("meshmill.exe", "meshmillcli.exe") and image.parent in roots:
+        return True
+    # A shared python.exe is insufficient evidence. Require MeshMill's native
+    # adapter loaded from this application's trusted directory.
+    return any(Path(module).name.startswith("_meshmill_qem")
+               and Path(module).resolve().parent in roots for module in record.get("modules", []))
+
+
+def _stop_dead_owner_worker(record) -> bool:
+    """Hold the worker handle while checking identity and parent lifetime."""
+    from ctypes import wintypes
+
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    api.OpenProcess.restype = wintypes.HANDLE
+    api.CloseHandle.argtypes = [wintypes.HANDLE]
+    api.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    api.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    api.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+
+    def created(handle):
+        values = [wintypes.FILETIME() for _ in range(4)]
+        if not api.GetProcessTimes(handle, *(ctypes.byref(value) for value in values)):
+            return None
+        return (values[0].dwHighDateTime << 32) | values[0].dwLowDateTime
+
+    child = api.OpenProcess(0x101001, False, record["pid"])
+    if not child:
+        return False
+    try:
+        child_time = created(child)
+        if child_time is None or child_time != record.get("created"):
+            return False  # PID was reused after discovery.
+        parent = api.OpenProcess(0x101000, False, record["parent"])
+        if parent:
+            try:
+                parent_time = created(parent)
+                if parent_time is None:
+                    return False
+                if parent_time <= child_time and api.WaitForSingleObject(parent, 0) != 0:
+                    return False
+            finally:
+                api.CloseHandle(parent)
+        elif ctypes.get_last_error() != 87:
+            return False  # Access denied or unknown status is not proof of death.
+        return bool(api.TerminateProcess(child, 1)) and api.WaitForSingleObject(child, 5000) == 0
+    finally:
+        api.CloseHandle(child)
+
+
+def recover_orphan_workers(*, excluded_pids=(), trusted_roots=None):
+    """Recover verified older workers; leave live owners and unknown processes alone."""
+    if os.name != "nt":
+        return []
+    roots = trusted_roots or [Path(__file__).resolve().parent, Path(sys.executable).resolve().parent]
+    if trusted_roots is None:
+        # A development worktree can use the original checkout's virtualenv.
+        # Trust that checkout only when this running interpreter identifies it.
+        environment = Path(sys.prefix).resolve()
+        checkout = environment.parent
+        if ((environment / "pyvenv.cfg").is_file()
+                and (checkout / "meshmill.py").is_file()
+                and (checkout / "worker_lifecycle.py").is_file()):
+            roots.append(checkout)
+    script = r'''
+$rows = foreach ($p in (Get-CimInstance Win32_Process | Where-Object {
+    $_.Name -in @('python.exe','pythonw.exe','MeshMill.exe','MeshMillCLI.exe') -and
+    $_.CommandLine -like '*--multiprocessing-fork*'
+})) {
+    try {
+        $g = Get-Process -Id $p.ProcessId -ErrorAction Stop
+        $mods = @($g.Modules | ForEach-Object { $_.FileName })
+        [pscustomobject]@{pid=[int]$p.ProcessId; parent=[int]$p.ParentProcessId;
+            command=$p.CommandLine; image=$g.Path; modules=$mods;
+            created=$g.StartTime.ToUniversalTime().ToFileTimeUtc()}
+    } catch {}
+}
+ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress
+'''
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=20, check=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        records = json.loads(result.stdout or "[]")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    stopped = []
+    for record in records:
+        if record["pid"] in (*excluded_pids, os.getpid()):
+            continue
+        if _owned_orphan_candidate(record, roots) and _stop_dead_owner_worker(record):
+            stopped.append(record["pid"])
+    return stopped
 
 
 def _watch_parent() -> None:

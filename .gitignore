@@ -21,3 +21,15 @@ release/
 Thumbs.db
 .localization-work/
 orientation-*.jsonl
+
+# Local development and release tooling
+/AGENTS.md
+/docs/RELEASE_CHECKLIST.md
+/tools/release_privacy_check.py
+/tools/normalize_package_timestamps.py
+/tools/register_windows_open_with.ps1
+/tests/test_open_with_registration.py
+/tools/localization/browser_queue_ui.py
+/tools/localization/prepare_queue.py
+/tools/localization/finish_and_validate.py
+/tools/normalize_math_markdown.py

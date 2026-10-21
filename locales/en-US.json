@@ -122,7 +122,7 @@
   "reset.all.settings": "Reset all settings",
   "right": "Right",
   "ruler.cleared": "Ruler cleared",
-  "runs.one.github.release.check.inside.meshmill.shortly.after.the.app.open": "Runs one GitHub release check inside MeshMill shortly after the app opens. MeshMill does not install an updater, service, scheduled task, startup item, or background process. Nothing runs while MeshMill is closed, and updates are never downloaded or installed automatically.",
+  "runs.one.github.release.check.inside.meshmill.shortly.after.the.app.open": "Runs one GitHub release check inside MeshMill shortly after the app opens. MeshMill does not install an updater, service, scheduled task, startup item, or background process. Nothing runs while MeshMill is closed. A newer release prompts you once MeshMill is idle unless automatic installation is enabled.",
   "stl.mesh.stl": "STL mesh (*.stl)",
   "stl.path.copied": "STL path copied",
   "save.current.mesh": "Save current mesh",

@@ -11,13 +11,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import fast_simplification
-from qem_progress import simplify as simplify_with_progress
 import numpy as np
 from vtkmodules.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray, vtk_to_numpy
 from vtkmodules.vtkCommonCore import vtkPoints
 from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData
 from vtkmodules.vtkFiltersCore import vtkQuadricDecimation
+
+from qem_progress import simplify as simplify_with_progress
 
 _cuda_dll_directories = []
 if os.name == "nt":
@@ -242,10 +242,8 @@ def prepare_gpu_backend(preference: str = "system") -> dict[str, Any]:
     }
 
 
-def physical_probe_dimensions(
-    points: np.ndarray, faces: np.ndarray, target: int
-) -> dict[str, float]:
-    """Derive probe diameter, tip radius, and minimum pitch from the mesh."""
+def probe_source_statistics(points: np.ndarray, faces: np.ndarray) -> dict[str, float]:
+    """Read-only, target-independent inputs for physical probe dimensions."""
     sample_faces = faces[:: max(1, len(faces) // 500_000)]
     triangles = points[sample_faces]
     edges = np.concatenate(
@@ -262,6 +260,16 @@ def physical_probe_dimensions(
         axis=1,
     )
     area = float(0.5 * twice_area.sum() * (len(faces) / len(sample_faces)))
+    return {"diameter": probe_diameter, "sampled_area": area}
+
+
+def physical_probe_dimensions(
+    points: np.ndarray, faces: np.ndarray, target: int, source_statistics=None
+) -> dict[str, float]:
+    """Derive probe dimensions, retaining the same sampling and arithmetic."""
+    statistics = source_statistics if source_statistics is not None else probe_source_statistics(points, faces)
+    probe_diameter = statistics["diameter"]
+    area = statistics["sampled_area"]
     output_pitch = float(np.sqrt(4.0 * area / (np.sqrt(3.0) * target)))
     return {
         "diameter": probe_diameter,
@@ -298,7 +306,7 @@ def readonly_gpu_edge_counts(faces: np.ndarray, gpu_preference: str = "system"):
                 keys.append((low << cp.uint64(32)) | high)
             _, counts = cp.unique(cp.concatenate(keys), return_counts=True)
             return cp.asnumpy(counts)
-    except Exception:  # Read-only acceleration is optional, including on driver/OOM errors.
+    except Exception:  # noqa: BLE001 - optional acceleration falls back on driver/OOM failures
         return None
 
 
@@ -355,7 +363,7 @@ def readonly_gpu_density_field(points, faces, gpu_preference="system", progress=
                 if not checkpoint("Smoothing density regions", start + len(chunk)):
                     return None
             return cp.asnumpy((log + neighbor_sum) / (1.0 + neighbors)), cp.asnumpy(valid)
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional presentation acceleration has a CPU fallback
         # Optional presentation acceleration includes a CPU fallback for OOM/driver failures.
         return None
 
@@ -373,6 +381,7 @@ def adaptive_probe_projection(
     density_slope: float = 1.5,
     progress: Callable[[str, int, int], None] | None = None,
     protected_vertices: np.ndarray | None = None,
+    source_statistics: dict[str, float] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Project supported scan-scale excursions onto locally fitted surface trajectories."""
     if not gpu_backend_available(gpu_preference):
@@ -387,7 +396,7 @@ def adaptive_probe_projection(
     stage = "Analyzing depth and density on GPU" if density_adaptive else "Analyzing surface on GPU"
     if progress is not None:
         progress(stage, 0, 6)
-    physical = physical_probe_dimensions(points, faces, target)
+    physical = physical_probe_dimensions(points, faces, target, source_statistics)
     tip_radius = physical["tip_radius"]
     displacement_cap = tip_radius * 0.25
     pitches = [physical["minimum_pitch"] * factor for factor in (8.0, 4.0, 2.0, 1.0)]
@@ -575,6 +584,7 @@ def simplify_depth_adaptive_qem(
     gpu_preference: str = "system",
     progress: Callable[[str, int, int], None] | None = None,
     protected_vertices: np.ndarray | None = None,
+    source_statistics: dict[str, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Run Depth Adaptive QEM, or boundary-preserving Fast QEM without CUDA."""
     if progress is not None:
@@ -587,6 +597,7 @@ def simplify_depth_adaptive_qem(
             gpu_preference,
             progress=progress,
             protected_vertices=protected_vertices,
+            source_statistics=source_statistics,
         )
     except Exception as error:  # noqa: BLE001 - unavailable GPU backends fall back safely
         if os.environ.get("MESHMILL_GPU_DIAGNOSTICS"):
@@ -625,6 +636,7 @@ def simplify_depth_density_adaptive_qem(
     gpu_preference: str = "system",
     progress: Callable[[str, int, int], None] | None = None,
     protected_vertices: np.ndarray | None = None,
+    source_statistics: dict[str, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Combine density-adaptive depth probes, Fast QEM, and bounded finishing."""
     if progress is not None:
@@ -638,6 +650,7 @@ def simplify_depth_density_adaptive_qem(
             density_adaptive=True,
             progress=progress,
             protected_vertices=protected_vertices,
+            source_statistics=source_statistics,
         )
         if report.get("backend") == "Fast QEM fallback":
             report["backend"] = "Fast QEM fallback"

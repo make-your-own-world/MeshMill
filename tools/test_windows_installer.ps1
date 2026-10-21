@@ -27,6 +27,21 @@ $AssociationKeys = @(
 $StlKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Classes\.stl')
 $DefaultStlHandler = if ($StlKey) { $StlKey.GetValue('') } else { $null }
 if ($StlKey) { $StlKey.Dispose() }
+function Read-StlDefaultChoice {
+    $Key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+        'Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.stl\UserChoice')
+    try { if ($Key) { return $Key.GetValue('ProgId') } } finally { if ($Key) { $Key.Dispose() } }
+    return $null
+}
+$DefaultStlChoice = Read-StlDefaultChoice
+function Assert-StlDefaultUnchanged {
+    $Key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Classes\.stl')
+    try { $Current = if ($Key) { $Key.GetValue('') } else { $null } }
+    finally { if ($Key) { $Key.Dispose() } }
+    if ($Current -ne $DefaultStlHandler -or (Read-StlDefaultChoice) -ne $DefaultStlChoice) {
+        throw 'The STL default application changed.'
+    }
+}
 $StartMenuShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$ProductName.lnk"
 $DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "$ProductName.lnk"
 $StartMenuShortcutBackup = Join-Path $TestRoot "existing-start-menu-shortcut.lnk"
@@ -183,6 +198,7 @@ try {
         (Resolve-Path -LiteralPath $BaselineInstallerPath).Path
     } else { $Installer }
     Invoke-CheckedProcess -FilePath $InitialInstaller -ArgumentList $InstallArguments
+    Assert-StlDefaultUnchanged
 
     foreach ($Required in @("MeshMill.exe", "MeshMillCLI.exe", "unins000.exe")) {
         if (-not (Test-Path -LiteralPath (Join-Path $InstallDirectory $Required))) {
@@ -222,6 +238,7 @@ try {
     $OrphanWorker = Start-OrphanWorkerFixture
     Invoke-CheckedProcess -FilePath $Installer -ArgumentList $UpgradeArguments
     Assert-WorkerCleanup -Worker $OrphanWorker
+    Assert-StlDefaultUnchanged
     if (Test-Path -LiteralPath $ObsoleteFile) {
         throw "The upgrade left an obsolete PyInstaller payload file behind."
     }
@@ -247,6 +264,12 @@ try {
             throw "The installer did not register its Open with entry."
         }
     }
+    $Registered = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\RegisteredApplications')
+    try {
+        if (-not $Registered -or $Registered.GetValue($ProductName) -ne "$SettingsSubkey\Capabilities") {
+            throw 'The application is missing from Windows default-app settings.'
+        }
+    } finally { if ($Registered) { $Registered.Dispose() } }
     Invoke-CheckedProcess -FilePath (Join-Path $InstallDirectory "unins000.exe") -ArgumentList @(
         "/VERYSILENT",
         "/SUPPRESSMSGBOXES",
@@ -254,6 +277,13 @@ try {
     )
     Wait-ForRemoval -Path (Join-Path $InstallDirectory "MeshMill.exe")
     Assert-WorkerCleanup -Worker $OrphanWorker
+    Assert-StlDefaultUnchanged
+    $Registered = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\RegisteredApplications')
+    try {
+        if ($Registered -and $null -ne $Registered.GetValue($ProductName)) {
+            throw 'Uninstall left a registered-application entry behind.'
+        }
+    } finally { if ($Registered) { $Registered.Dispose() } }
     if (Test-Path -LiteralPath (Join-Path $InstallDirectory "MeshMill.exe")) {
         throw "The uninstaller left the application executable behind."
     }

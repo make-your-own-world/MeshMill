@@ -9,7 +9,66 @@ from pathlib import Path
 import pytest
 from worker_lifecycle_cases import slow_task
 
-from worker_lifecycle import OwnedProcessPool, completed_futures
+from worker_lifecycle import (
+    OwnedProcessPool,
+    _owned_orphan_candidate,
+    _spawn_owner,
+    _stop_dead_owner_worker,
+    completed_futures,
+)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process-handle recovery")
+def test_recovery_checks_live_parent_and_process_identity_before_termination():
+    from ctypes import wintypes
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    expired = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        expired.wait(timeout=10)
+        values = [wintypes.FILETIME() for _ in range(4)]
+        assert api.GetProcessTimes(int(child._handle), *(ctypes.byref(value) for value in values))
+        created = (values[0].dwHighDateTime << 32) | values[0].dwLowDateTime
+        record = {"pid": child.pid, "parent": os.getpid(), "created": created}
+        assert not _stop_dead_owner_worker(record)
+        assert child.poll() is None
+        record["parent"] = expired.pid
+        record["created"] = created + 1
+        assert not _stop_dead_owner_worker(record)
+        assert child.poll() is None
+        record["created"] = created
+        assert _stop_dead_owner_worker(record)
+        child.wait(timeout=10)
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=10)
+
+
+def test_recovery_requires_spawn_command_and_trusted_meshmill_ownership(tmp_path):
+    record = {"parent": 123, "command": 'python -c "from multiprocessing.spawn import '
+              'spawn_main; spawn_main(parent_pid=123, pipe_handle=9)" --multiprocessing-fork',
+              "image": str(tmp_path / "python.exe"), "modules": []}
+    assert _spawn_owner(record["command"]) == 123
+    assert not _owned_orphan_candidate(record, [tmp_path])
+    record["modules"] = [str(tmp_path / "_meshmill_qem.cp312-win_amd64.pyd")]
+    assert _owned_orphan_candidate(record, [tmp_path])
+    assert not _owned_orphan_candidate(record, [tmp_path / "other"])
+    record["parent"] = 456
+    assert not _owned_orphan_candidate(record, [tmp_path])
+    record["parent"] = 123
+    record["command"] = "python service.py"
+    assert not _owned_orphan_candidate(record, [tmp_path])
+
+
+def test_recovery_frozen_worker_and_invalid_commands(tmp_path):
+    record = {"parent": 123, "command": 'MeshMill.exe --multiprocessing-fork parent_pid=123 pipe_handle=9',
+              "image": str(tmp_path / "MeshMill.exe"), "modules": []}
+    assert _owned_orphan_candidate(record, [tmp_path])
+    for command in ("python", "spawn_main(parent_pid=123)",
+                    "spawn_main(parent_pid=__import__('os')) --multiprocessing-fork"):
+        assert _spawn_owner(command) is None
 
 
 def wait_until(predicate, timeout=20):
@@ -87,7 +146,13 @@ def test_workers_exit_after_owner_is_force_closed(tmp_path, mode):
     handles = []
     try:
         expected = 3 if mode == "nested" else 1
-        wait_until(lambda: len(list(tmp_path.iterdir())) == expected)
+        def worker_pids_ready():
+            paths = list(tmp_path.iterdir())
+            try:
+                return len(paths) == expected and all(path.read_text().isdecimal() for path in paths)
+            except OSError:
+                return False
+        wait_until(worker_pids_ready)
         pids = [int(path.read_text()) for path in tmp_path.iterdir()]
         assert len(set(pids)) == expected
         if os.name == "nt":

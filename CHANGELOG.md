@@ -2,6 +2,65 @@
 
 Published releases are listed newest first. Preview builds are marked separately.
 
+## 0.3.3 - 2026-10-21
+
+### Loading and optimization preparation
+
+- Make loaded meshes interactive without waiting for GPU initialization to finish. GPU setup
+  continues in the background.
+- Prepare reusable probe measurements during idle time for GPU-guided reduction. Reuse them
+  across target changes and refresh them when geometry changes, retaining the existing math.
+- Use the normal calculation path when background preparation is unfinished or unavailable.
+
+### Viewport and navigation
+
+- Establish Front from the opening camera, with the other five views derived from that fixed reference.
+- Fit all six standard views closely inside the viewport with a small margin and no cropping.
+- Restore the opening rotation, zoom, pan, and Front reference when reloading the original mesh.
+- Preserve framing across Shaded, Density, Wireframe, and Vertices, including initial Density loading.
+- Keep the mesh visible during density-color calculation.
+- Improve selected view-button text and icon contrast across themes, and leave views unselected
+  when no mesh is loaded.
+
+### Metrics history
+
+- Fill the graph at full resolution before progressively compressing older history toward the left.
+- Keep recent activity detailed and retain averages, minimums, and maximums in display summaries.
+- Retain raw readings within the selected history period for higher-detail viewing and match
+  timeline labels to the displayed history span.
+
+### File opening and Windows integration
+
+- Remember the last opened folder by default. Add Smart open (the parent of the last folder)
+  and a specific starting-folder option, with fallback to an existing parent for unavailable paths.
+- Add a Preferences action to choose the default STL application through Windows Settings.
+  Installation and upgrades advertise Open with MeshMill without replacing an existing default.
+
+### Update preferences
+
+- Offer Install now, Remind me next time, and Skip this version after optional startup checks.
+- Add an installation action in Settings for available updates. Skipped versions remain manually installable.
+- Add optional automatic installation, available only with automatic checking enabled. Both are off by default.
+- Default automatic installation to hotfixes and maintenance within the current release series.
+  An optional All releases scope also permits minor and major upgrades; otherwise those ask first.
+- Wait for an idle app with no unsaved mesh changes before automatic installation, including
+  changes made during download. Reopen the current STL after the Windows upgrade.
+- Run update checking inside MeshMill, without installing a separate updater service or scheduled task.
+
+### Preferences and interface
+
+- Use Theme, Viewport, and Match theme consistently.
+- Show custom density-gradient controls only for Custom viewport appearance, including during search.
+- Place compact search beside Save, Reset, and Cancel at the bottom of Preferences.
+- Retain reset confirmation, with Save applying the changes.
+
+### Reliability
+
+- Recover verified orphaned MeshMill workers left behind by older versions on startup.
+- Check application ownership, parent-process lifetime, and process identity before recovery.
+  Leave unrelated Python processes and workers with live owners running.
+- Retain the worker shutdown and parent-death protection introduced in 0.3.2.
+
 ## 0.3.2 - 2026-10-21
 
 ### Worker cleanup

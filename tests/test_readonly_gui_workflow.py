@@ -1,13 +1,22 @@
 """Exercise real Qt/VTK state transitions with isolated preferences."""
 import threading
 import time
+from concurrent.futures import Future
 
 import numpy as np
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QSettings, QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QKeySequence
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QFrame, QLabel, QLineEdit, QMessageBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QFrame,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+)
 from test_operation_progress import sphere
 from vtkmodules.vtkIOGeometry import vtkSTLWriter
 from worker_lifecycle_cases import slow_task
@@ -30,6 +39,299 @@ def settled(window):
             and window.pending_density_poly is None and window.active_actor is not None)
 
 
+def test_update_remind_and_skip_choices(gui, monkeypatch):
+    _, window, _ = gui
+    window.latest_release_version = "99.0.0"
+    window.latest_release_url = "https://example.org/release"
+    window.latest_release = {}
+    monkeypatch.setattr(window, "_confirm_update_install", lambda _: "remind")
+    window._install_latest_release()
+    assert window.settings.value("updates/skipped_version", "") == ""
+    assert window._update_available()
+    assert "99.0.0" in window._prompted_update_versions
+
+    # A new application session has no session-only prompt suppression.
+    window._prompted_update_versions.clear()
+    window.update_checks_enabled = True
+    window._pending_update_prompt = "99.0.0"
+    monkeypatch.setattr(window, "_confirm_update_install", lambda _: "skip")
+    window._offer_startup_update()
+    assert window.settings.value("updates/skipped_version") == "99.0.0"
+    assert window._update_available()  # Manual installation remains available.
+
+
+def test_auto_install_requires_checking_and_saved_idle_mesh(gui, monkeypatch):
+    _, window, _ = gui
+    assert not window.update_checks_enabled
+    assert not window.auto_install_updates
+    window.update_checks_enabled = True
+    window.auto_install_updates = True
+    window.auto_install_scope = "all"
+    window.latest_release_version = "99.0.0"
+    window.latest_release_url = "https://example.org/release"
+    window._pending_update_prompt = "99.0.0"
+    calls = []
+    monkeypatch.setattr(window, "_install_latest_release", lambda **kw: calls.append(kw))
+    window.mesh_modified = True
+    window._offer_startup_update()
+    assert not calls
+    window.mesh_modified = False
+    window._offer_startup_update()
+    assert calls == [{"automatic": True}]
+
+
+def test_auto_install_rechecks_unsaved_work_after_download(gui, monkeypatch, tmp_path):
+    _, window, _ = gui
+    window.update_checks_enabled = True
+    window.auto_install_updates = True
+    window.auto_install_scope = "all"
+    window._automatic_update_in_progress = True
+    installer = tmp_path / "setup.exe"
+    launched = []
+    monkeypatch.setattr(mm.subprocess, "Popen", lambda *a, **kw: launched.append(a))
+    monkeypatch.setattr(QApplication, "quit", lambda: None)
+    window.mesh_modified = True
+    window._finish_update_download(installer, None)
+    assert not launched
+    assert window._ready_auto_installer == installer
+    window.mesh_modified = False
+    window._offer_startup_update()
+    assert len(launched) == 1
+    assert window._ready_auto_installer is None
+
+
+def test_maintenance_update_scope_prompts_for_minor_and_major_releases(gui, monkeypatch):
+    _, window, _ = gui
+    monkeypatch.setattr(mm, "APP_VERSION", "0.3.2")
+    window.update_checks_enabled = True
+    window.auto_install_updates = True
+    window.auto_install_scope = "maintenance"
+    window.latest_release_url = "https://example.org/release"
+    calls = []
+    monkeypatch.setattr(window, "_install_latest_release", lambda **kw: calls.append(kw))
+    for version, automatic in (("0.3.3", True), ("0.4.0", False), ("1.0.0", False)):
+        window.latest_release_version = version
+        window._pending_update_prompt = version
+        window._offer_startup_update()
+        assert calls[-1] == {"automatic": automatic}
+    window.auto_install_scope = "all"
+    assert window._auto_install_release_allowed()
+
+
+def test_empty_view_buttons_and_open_folder_modes(gui, tmp_path):
+    _, window, _ = gui
+    window.active_actor = None
+    window.source_poly = None
+    window._update_active_view_button()
+    assert not any(b.isChecked() for b in window.view_buttons.values())
+    window.renderer.GetActiveCamera().Azimuth(12)
+    assert not any(b.isChecked() for b in window.view_buttons.values())
+    for theme in mm.APPEARANCE_THEMES:
+        window.appearance_theme_name = theme
+        for direction, button in window.view_buttons.items():
+            button.click()
+            assert not any(b.isChecked() for b in window.view_buttons.values())
+            window._apply_theme_icon(button, "view-" + direction)
+            assert not button.icon().isNull()
+        palette = mm.appearance_theme(theme)
+        foreground = mm.selected_control_text(palette)
+        assert foreground in ("#FFFFFF", "#000000")
+    folder = tmp_path / "scans" / "part"
+    folder.mkdir(parents=True)
+    window.settings.setValue("files/last_open_folder", str(folder))
+    window.settings.setValue("files/open_mode", "last")
+    assert window._file_open_directory() == str(folder)
+    window.settings.setValue("files/open_mode", "smart")
+    assert window._file_open_directory() == str(folder.parent)
+    window.settings.setValue("files/open_mode", "fixed")
+    window.settings.setValue("files/open_folder", str(tmp_path))
+    assert window._file_open_directory() == str(tmp_path)
+
+
+def test_association_preference_only_opens_windows_settings(gui, monkeypatch):
+    _, window, _ = gui
+    opened = []
+    monkeypatch.setattr(mm.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(mm.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(mm.QDesktopServices, "openUrl", lambda url: opened.append(url.toString()) or True)
+    window._open_stl_association_settings()
+    assert opened == ["ms-settings:defaultapps"]
+
+
+def test_installer_advertises_stl_without_replacing_default():
+    installer = (mm.Path(__file__).resolve().parents[1] / "installer" / "MeshMill.iss").read_text()
+    registry = installer.split("[Registry]", 1)[1].split("[Run]", 1)[0]
+    assert "OpenWithProgids" in registry
+    assert "RegisteredApplications" in registry
+    assert "UserChoice" not in registry
+    assert 'Subkey: "Software\\Classes\\.stl";' not in registry
+
+
+def test_opening_camera_establishes_fixed_front(gui):
+    _, window, _ = gui
+    assert window.view_buttons["front"].isChecked()
+    camera = window.renderer.GetActiveCamera()
+    opening = np.asarray(camera.GetPosition()) - np.asarray(camera.GetFocalPoint())
+    opening /= np.linalg.norm(opening)
+    assert np.allclose(window.saved_standard_views["front"][0], opening)
+    reference = {key: (view.copy(), up.copy())
+                 for key, (view, up) in window.saved_standard_views.items()}
+    for direction in ("left", "right", "top", "bottom", "back", "front"):
+        window._set_standard_view(direction)
+        assert window.view_buttons[direction].isChecked()
+        view, up = window.saved_standard_views[direction]
+        assert np.isclose(np.linalg.norm(view), 1)
+        assert np.isclose(np.dot(view, up), 0)
+    camera.Azimuth(17)
+    for key, (view, up) in reference.items():
+        assert np.array_equal(window.saved_standard_views[key][0], view)
+        assert np.array_equal(window.saved_standard_views[key][1], up)
+
+
+def test_standard_views_fit_bounds_without_cropping(gui):
+    _, window, _ = gui
+    bounds = window.active_actor.GetBounds()
+    width, height = window.vtk_widget.GetRenderWindow().GetSize()
+    for parallel in (False, True):
+        window.renderer.GetActiveCamera().SetParallelProjection(parallel)
+        for direction in mm.STANDARD_VIEWS:
+            window._set_standard_view(direction)
+            projected = []
+            for x in bounds[:2]:
+                for y in bounds[2:4]:
+                    for z in bounds[4:6]:
+                        window.renderer.SetWorldPoint(x, y, z, 1)
+                        window.renderer.WorldToDisplay()
+                        px, py, _ = window.renderer.GetDisplayPoint()
+                        projected.append((px / width, py / height))
+            projected = np.asarray(projected)
+            assert projected.min() >= .0299, (parallel, direction)
+            assert projected.max() <= .9701, (parallel, direction)
+            assert np.ptp(projected, axis=0).max() >= .939, (parallel, direction)
+
+
+def test_reload_original_restores_opening_rotation_pan_and_zoom(gui, monkeypatch):
+    app, window, _ = gui
+    camera = window.renderer.GetActiveCamera()
+    original = (camera.GetPosition(), camera.GetFocalPoint(), camera.GetViewUp(),
+                camera.GetParallelScale(), camera.GetViewAngle())
+    window._set_standard_view("left")
+    camera.Azimuth(23)
+    camera.Zoom(2)
+    camera.SetFocalPoint(3, 4, 5)
+    window.mesh_modified = True
+    monkeypatch.setattr(QMessageBox, "question", lambda *_: QMessageBox.StandardButton.Yes)
+    window._reload_original()
+    wait(app, lambda: settled(window))
+    restored = (camera.GetPosition(), camera.GetFocalPoint(), camera.GetViewUp(),
+                camera.GetParallelScale(), camera.GetViewAngle())
+    for actual, expected in zip(restored, original):
+        assert np.allclose(actual, expected)
+    assert window.view_buttons["front"].isChecked()
+    assert not window.mesh_modified
+
+
+def test_all_display_modes_preserve_camera_and_initial_framing(gui):
+    app, window, _ = gui
+    camera = window.renderer.GetActiveCamera()
+
+    def frame():
+        return np.array([*camera.GetPosition(), *camera.GetFocalPoint(),
+                         *camera.GetViewUp(), camera.GetViewAngle(), camera.GetParallelScale()])
+
+    def mode(value):
+        window.display_type.setCurrentIndex(window.display_type.findData(value))
+        wait(app, lambda: settled(window))
+
+    opening = frame()
+    for value in mm.DISPLAY_MODES:
+        mode(value)
+        assert np.allclose(frame(), opening), value
+    camera.Azimuth(21)
+    camera.Zoom(1.7)
+    moved = frame()
+    window.density_cache.clear()  # Exercise asynchronous, uncached switching again.
+    for value in ("Wireframe", "Density", "Vertices", "Shaded"):
+        mode(value)
+        assert np.allclose(frame(), moved), value
+    # Fresh-window camera orientation and lens, identical across load defaults.
+    for value in mm.DISPLAY_MODES:
+        mode(value)
+        camera.SetPosition(0, 0, 1)
+        camera.SetFocalPoint(0, 0, 0)
+        camera.SetViewUp(0, 1, 0)
+        camera.SetViewAngle(30)
+        camera.SetParallelScale(1)
+        window.density_cache.clear()
+        window.load_path(window.source_path)
+        wait(app, lambda: settled(window))
+        assert np.allclose(frame(), opening), value
+        assert window.view_buttons["front"].isChecked()
+
+
+def test_loading_becomes_interactive_before_gpu_warmup_finishes(gui, monkeypatch):
+    app, window, _ = gui
+    points, faces = window.source_points.copy(), window.source_faces.copy()
+    warmup = Future()
+    original_submit = window.optimization_executor.submit
+
+    def submit(function, *args, **kwargs):
+        if function is mm.prepare_gpu_backend:
+            return warmup
+        return original_submit(function, *args, **kwargs)
+
+    monkeypatch.setattr(window.optimization_executor, "submit", submit)
+    monkeypatch.setattr(mm, "gpu_backend_supported", lambda *_: True)
+    window.load_path(window.source_path)
+    try:
+        wait(app, lambda: settled(window), timeout=5)
+        assert not warmup.done()
+        assert window.preview_button.isEnabled()
+        assert not window.loading_frame.isVisible()
+        assert np.array_equal(window.source_points, points)
+        assert np.array_equal(window.source_faces, faces)
+        window._set_standard_view("right")
+        assert window.view_buttons["right"].isChecked()
+        assert window._cached_source_measurements(window.source_points, window.source_faces) is not None
+    finally:
+        warmup.set_result({"backend": "test"})
+
+
+def test_idle_probe_cache_is_readonly_and_rejects_changed_geometry(gui, monkeypatch):
+    app, window, _ = gui
+    monkeypatch.setattr(mm, "is_gpu_guided_algorithm", lambda _: True)
+    points, faces = window.source_points, window.source_faces
+    before_points, before_faces = points.copy(), faces.copy()
+    window._precache_source_analysis()
+    wait(app, lambda: window._cached_probe_statistics(points, faces) is not None)
+    job = window._probe_statistics_job
+    window._precache_source_analysis()
+    assert window._probe_statistics_job is job
+    assert window._cached_probe_statistics(points.copy(), faces) is None
+    assert window._cached_probe_statistics(points, faces.copy()) is None
+    assert np.array_equal(points, before_points)
+    assert np.array_equal(faces, before_faces)
+
+
+@pytest.mark.parametrize("label, expected", [
+    ("Install now", "install"),
+    ("Remind me next time", "remind"),
+    ("Skip this version", "skip"),
+])
+def test_update_prompt_buttons(gui, label, expected):
+    app, window, _ = gui
+    window.latest_release_version = "99.0.0"
+
+    def choose():
+        prompt = app.activeModalWidget()
+        assert isinstance(prompt, QMessageBox)
+        assert prompt.defaultButton().text() == "Remind me next time"
+        next(button for button in prompt.buttons() if button.text() == label).click()
+
+    QTimer.singleShot(30, choose)
+    assert window._confirm_update_install(True) == expected
+
+
 @pytest.fixture
 def gui(tmp_path, monkeypatch, request):
     app = QApplication.instance() or QApplication([])
@@ -39,7 +341,7 @@ def gui(tmp_path, monkeypatch, request):
     if hasattr(request, "param"):
         settings.setValue("shortcuts/toggle_fullscreen", request.param)
     monkeypatch.setattr(mm, "QSettings", lambda *_: settings)
-    monkeypatch.setattr(mm, "cuda_devices", lambda: [])
+    monkeypatch.setattr(mm, "cuda_devices", list)
     monkeypatch.setattr(mm, "gpu_backend_supported", lambda *_: False)
     errors = []
     monkeypatch.setattr(QMessageBox, "critical", lambda *args: errors.append(str(args[-1])))
@@ -106,7 +408,7 @@ def test_camera_rotation_clears_ruler_but_preserves_selection(gui):
 
 
 def test_repeated_arrow_rotation_keeps_pivot_and_zoom(gui, monkeypatch):
-    app, window, _ = gui
+    _app, window, _ = gui
     camera = window.renderer.GetActiveCamera()
     calls = []
     pivot = np.asarray(camera.GetFocalPoint()) + np.array([.1, .2, .3])
@@ -116,7 +418,6 @@ def test_repeated_arrow_rotation_keeps_pivot_and_zoom(gui, monkeypatch):
     monkeypatch.setattr(window, "_keyboard_view_pivot", pick)
     window._keyboard_navigate("right", False, False)
     fixed = np.asarray(camera.GetFocalPoint())
-    position = np.asarray(camera.GetPosition())
     radius, scale, angle = camera.GetDistance(), camera.GetParallelScale(), camera.GetViewAngle()
     for key in ("right", "up"):
         start = np.asarray(camera.GetPosition())
@@ -282,6 +583,22 @@ def test_preferences_search_filters_clears_and_cancel_preserves_settings(gui):
         dialog = app.activeModalWidget()
         try:
             search = dialog.findChild(QLineEdit, "preferencesSearch")
+            auto_install = dialog.findChild(QCheckBox, "automaticUpdateInstall")
+            checking = next(box for box in dialog.findChildren(QCheckBox)
+                            if box.text() == "Check for updates when MeshMill opens")
+            assert not auto_install.isChecked()
+            assert not auto_install.isEnabled()
+            scope = dialog.findChild(QComboBox, "automaticUpdateScope")
+            assert scope.currentData() == "maintenance"
+            assert not scope.isEnabled()
+            checking.setChecked(True)
+            assert auto_install.isEnabled()
+            auto_install.setChecked(True)
+            assert scope.isEnabled()
+            checking.setChecked(False)
+            assert not auto_install.isEnabled()
+            assert not auto_install.isChecked()
+            assert not scope.isEnabled()
             assert search.isClearButtonEnabled()
             sections = dialog.findChildren(QFrame, "settingsSection")
             assert len(sections) > 2
@@ -311,10 +628,21 @@ def test_preferences_search_filters_clears_and_cancel_preserves_settings(gui):
             assert dialog.findChild(QLabel, "preferencesNoMatches").isVisible()
             search.clear()
             assert all(not section.isHidden() for section in sections)
+            viewport = next(combo for combo in dialog.findChildren(QComboBox)
+                            if combo.findData("custom") >= 0 and combo.findData("match") >= 0)
+            for mode in ("custom", "match", "custom", "MeshMill Blue"):
+                index = viewport.findData(mode)
+                if index < 0:
+                    index = 1
+                viewport.setCurrentIndex(index)
+                search.setText("Density gradient")
+                assert label("Density gradient").isHidden() == (viewport.currentData() != "custom")
+                search.clear()
+                assert label("Density gradient").isHidden() == (viewport.currentData() != "custom")
             assert label("Tools pane").isVisible()
             assert label("Geometry processes").isVisible()
             assert not dialog.findChild(QLabel, "preferencesNoMatches").isVisible()
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - collect Qt timer assertions for the test thread
             failures.append(error)
         finally:
             dialog.reject()
@@ -474,7 +802,7 @@ def draw_selection(window, left, top, right, bottom):
 
 
 def test_selection_shrinks_preserves_added_region_and_empty_outline(gui):
-    app, window, _ = gui
+    _app, window, _ = gui
     width, height = window.vtk_widget.width(), window.vtk_widget.height()
     original = window.source_points.copy(), window.source_faces.copy()
     draw_selection(window, int(width*.1), int(height*.1), int(width*.9), int(height*.9))

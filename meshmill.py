@@ -19,6 +19,7 @@ import threading
 import time
 import traceback
 import warnings
+from bisect import bisect_left
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -28,7 +29,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-import fast_simplification
 import numpy as np
 import vtkmodules.vtkInteractionStyle
 import vtkmodules.vtkRenderingOpenGL2  # noqa: F401
@@ -130,10 +130,12 @@ from depth_adaptive_qem import (
     first_time_gpu_setup_needed,
     gpu_backend_supported,
     prepare_gpu_backend,
+    probe_source_statistics,
     simplify_depth_adaptive_qem,
     simplify_depth_density_adaptive_qem,
 )
 from gpu_resident import inspect_resident_vertices
+from metrics_history import history_position, history_span, summarize_history
 from out_of_core import (
     build_index,
     default_index_directory,
@@ -142,7 +144,7 @@ from out_of_core import (
     optimize_indexed_mesh,
 )
 from qem_progress import simplify as simplify_with_progress
-from worker_lifecycle import OwnedProcessPool
+from worker_lifecycle import OwnedProcessPool, recover_orphan_workers
 
 # Conservative allowance for source arrays, VTK objects, render data, and temporary work buffers.
 ESTIMATED_BYTES_PER_TRIANGLE = 220
@@ -470,6 +472,14 @@ def appearance_theme(name: str) -> dict[str, str]:
     return APPEARANCE_THEMES.get(name, APPEARANCE_THEMES[DEFAULT_APPEARANCE])
 
 
+def selected_control_text(theme: dict[str, str]) -> str:
+    color = QColor(theme["accent"])
+    channels = [v / 12.92 if v <= .04045 else ((v + .055) / 1.055) ** 2.4
+                for v in (color.redF(), color.greenF(), color.blueF())]
+    luminance = sum(c * w for c, w in zip(channels, (.2126, .7152, .0722)))
+    return "#FFFFFF" if luminance < .179 else "#000000"
+
+
 def app_stylesheet(name: str = DEFAULT_APPEARANCE, font_size: int = 12) -> str:
     theme = appearance_theme(name)
     compact_font_size = max(8, font_size - 3)
@@ -525,7 +535,7 @@ def app_stylesheet(name: str = DEFAULT_APPEARANCE, font_size: int = 12) -> str:
             f"QFrame#viewPad {{ background: {theme['overlay']}; border: 1px solid {theme['border']}; border-radius: 10px; }}",
             f"QFrame#viewPad QPushButton {{ background: {theme['field']}; color: {theme['text']}; border: 1px solid {theme['border']}; border-radius: 6px; min-width: 58px; min-height: 27px; padding: 2px 6px; }}",
             f"QFrame#viewPad QPushButton:hover {{ background: {theme['accent_soft']}; border-color: {theme['accent']}; }}",
-            f"QFrame#viewPad QPushButton:checked {{ background: {theme['accent']}; color: white; border-color: {theme['accent_hover']}; }}",
+            f"QFrame#viewPad QPushButton:checked, QFrame#viewPad QPushButton:pressed {{ background: {theme['accent']}; color: {selected_control_text(theme)}; border-color: {theme['accent_hover']}; }}",
             f"QFrame#loadingPanel {{ background: {theme['overlay']}; border: 1px solid {theme['border']}; border-radius: 14px; }}",
             f"QFrame#loadingPanel QLabel {{ background: transparent; color: {theme['text']}; }}",
             "QFrame#loadingPanel QProgressBar { min-height: 24px; max-height: 24px; }",
@@ -1403,17 +1413,25 @@ class CropPolygonOverlay(QWidget):
 
 
 class GeometryActivityGraph(QWidget):
-    """Rolling CPU/GPU history with marked geometry-processing intervals."""
+    """Recent readings in detail, with older activity summarized toward the left."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.samples: list[tuple[float, float, bool]] = []
+        self.sample_times: list[float] = []
+        self.refresh_seconds = 1.0
+        self.retention_seconds = 900.0
+        self.detail_seconds = 30.0
+        self._viewport_width = 240
+        self._revision = 0
+        self._summary_cache = None
+        self._paused_history = None
         self.max_samples = 1800
         self.pixels_per_sample = 2
         self.operation = "Idle"
         self.geometry_text = "No mesh loaded"
         self.apply_appearance(DEFAULT_APPEARANCE)
-        self.setFixedHeight(112)
+        self.setFixedHeight(128)
 
     def apply_appearance(self, name: str) -> None:
         theme = appearance_theme(name)
@@ -1438,12 +1456,19 @@ class GeometryActivityGraph(QWidget):
         operation: str,
         points: int,
         triangles: int,
+        *,
+        sample_time: float | None = None,
     ) -> None:
         cpu = max(0.0, min(100.0, cpu))
         gpu = max(0.0, min(100.0, gpu))
+        now = time.monotonic() if sample_time is None else sample_time
+        if len(self.sample_times) != len(self.samples):
+            self.sample_times = [now - (len(self.samples) - i) * self.refresh_seconds
+                                 for i in range(len(self.samples))]
         self.samples.append((cpu, gpu, processing))
-        self.samples = self.samples[-self.max_samples:]
-        self.setFixedWidth(max(240, round(len(self.samples) * self.pixels_per_sample + 16)))
+        self.sample_times.append(now)
+        self._trim_history()
+        self._revision += 1
         self.operation = operation
         self.geometry_text = (
             f"{fmt_count(points)} vertices / {fmt_count(triangles)} triangles"
@@ -1455,13 +1480,48 @@ class GeometryActivityGraph(QWidget):
     def configure_history(
         self, refresh_ms: int, minutes: int, visible_seconds: int = 30, viewport_width: int = 0
     ) -> None:
-        self.max_samples = max(1, math.ceil(minutes * 60_000 / max(1, refresh_ms)))
-        self.samples = self.samples[-self.max_samples:]
-        visible_samples = max(1, math.ceil(visible_seconds * 1000 / max(1, refresh_ms)))
-        width = max(240, viewport_width)
-        self.pixels_per_sample = max(2.0, width / visible_samples)
-        self.setFixedWidth(max(width, round(len(self.samples) * self.pixels_per_sample + 16)))
+        self.refresh_seconds = max(0.25, refresh_ms / 1000)
+        self.retention_seconds = max(1, minutes * 60)
+        self.detail_seconds = max(1, visible_seconds)
+        self.max_samples = math.ceil(self.retention_seconds / 0.25) + 1
+        self._trim_history()
+        self._viewport_width = max(240, viewport_width)
+        width = round(self._viewport_width * max(1.0, 30 / self.detail_seconds))
+        if self.width() != width:
+            self.setFixedWidth(width)
         self.update()
+
+    def _trim_history(self) -> None:
+        first = max(0, len(self.samples) - self.max_samples)
+        if self.sample_times and len(self.sample_times) == len(self.samples):
+            first = max(first, bisect_left(
+                self.sample_times, self.sample_times[-1] - self.retention_seconds
+            ))
+        if first:
+            self.samples = self.samples[first:]
+            self.sample_times = self.sample_times[first:]
+            self._revision += 1
+
+    def set_paused(self, paused: bool) -> None:
+        if paused and self._paused_history is None:
+            self._paused_history = (self.samples.copy(), self.sample_times.copy())
+        elif not paused:
+            self._paused_history = None
+        self._summary_cache = None
+        self.update()
+
+    def _history_summary(self, width: int):
+        samples, times = (self._paused_history if self._paused_history is not None
+                          else (self.samples, self.sample_times))
+        if len(times) != len(samples):
+            times = [i * self.refresh_seconds for i in range(len(samples))]
+        key = (self._revision, width, self.retention_seconds, self.detail_seconds,
+               self._paused_history is not None)
+        if self._summary_cache is None or self._summary_cache[0] != key:
+            self._summary_cache = (key, summarize_history(
+                samples, times, self.retention_seconds, self.detail_seconds, width
+            ))
+        return self._summary_cache[1]
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
@@ -1475,7 +1535,7 @@ class GeometryActivityGraph(QWidget):
             f"Geometry activity / {self.operation} / {self.geometry_text}",
         )
 
-        left, top, right, bottom = 8, 23, self.width() - 8, self.height() - 19
+        left, top, right, bottom = 8, 23, self.width() - 8, self.height() - 35
         height = max(1, bottom - top)
         painter.setPen(QPen(colors["grid"], 1))
         for fraction in (0.25, 0.5, 0.75):
@@ -1483,32 +1543,58 @@ class GeometryActivityGraph(QWidget):
             painter.drawLine(left, round(y), right, round(y))
 
         if self.samples:
-            step = self.pixels_per_sample
-            start_x = max(left, right - step * max(0, len(self.samples) - 1))
+            summary = self._history_summary(max(1, right - left))
             active_color = colors["active"]
-            for index, (_, _, active) in enumerate(self.samples):
-                if active:
-                    x = start_x + index * step
+            for item in summary:
+                if item.processing:
                     painter.fillRect(
-                        round(x - max(1.0, step) / 2),
+                        round(left + item.x),
                         top,
-                        max(2, round(step) + 1),
+                        2,
                         height,
                         active_color,
                     )
 
-            def draw_line(values: list[float], color: QColor) -> None:
+            def draw_line(channel: str, color: QColor) -> None:
+                peak_color = QColor(color)
+                peak_color.setAlpha(120)
+                painter.setPen(QPen(peak_color, 1))
+                for item in summary:
+                    x = left + item.x
+                    painter.drawLine(
+                        QPointF(x, bottom - height * getattr(item, channel + "_min") / 100),
+                        QPointF(x, bottom - height * getattr(item, channel + "_max") / 100),
+                    )
                 points = QPolygonF(
                     [
-                        QPointF(start_x + index * step, bottom - height * value / 100.0)
-                        for index, value in enumerate(values)
+                        QPointF(left + item.x,
+                                bottom - height * getattr(item, channel + "_mean") / 100)
+                        for item in summary
                     ]
                 )
                 painter.setPen(QPen(QColor(color), 1.8))
                 painter.drawPolyline(points)
 
-            draw_line([sample[0] for sample in self.samples], colors["cpu"])
-            draw_line([sample[1] for sample in self.samples], colors["gpu"])
+            draw_line("cpu", colors["cpu"])
+            draw_line("gpu", colors["gpu"])
+
+        painter.setPen(colors["text"])
+        occupied = []
+        _, axis_times = (self._paused_history if self._paused_history is not None
+                         else (self.samples, self.sample_times))
+        span = history_span(axis_times, self.retention_seconds, self.detail_seconds)
+        for age in sorted({0, self.detail_seconds, 120, 300, span}):
+            if age > span:
+                continue
+            label = "Now" if age == 0 else f"{age / 60:g}m" if age >= 60 else f"{age:g}s"
+            x = left + history_position(age, span, self.detail_seconds) * (right-left)
+            label_width = painter.fontMetrics().horizontalAdvance(label)
+            start = min(right-label_width, max(left, round(x-label_width/2)))
+            if any(start < end + 8 and start + label_width > begin - 8
+                   for begin, end in occupied):
+                continue
+            painter.drawText(start, self.height()-21, label)
+            occupied.append((start, start+label_width))
 
         painter.fillRect(QRect(0, self.height() - 18, self.width(), 18), colors["background"])
         legend_y = self.height() - 5
@@ -2879,11 +2965,13 @@ def simplify_arrays(
     aggressiveness: float = 7.0,
     gpu_preference: str = "system",
     progress: Callable[[str, int, int], None] | None = None,
+    probe_statistics: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     reduction = 1.0 - target / len(faces)
     if algorithm == DEPTH_DENSITY_ADAPTIVE_LABEL:
         output_points, output_faces, _report = simplify_depth_density_adaptive_qem(
-            points, faces, target, aggressiveness, gpu_preference, progress=progress
+            points, faces, target, aggressiveness, gpu_preference, progress=progress,
+            source_statistics=probe_statistics,
         )
         return output_points, output_faces
     if algorithm == DEPTH_ADAPTIVE_LABEL or algorithm == "Depth Adaptive QEM":
@@ -2894,6 +2982,7 @@ def simplify_arrays(
             max(8.0, aggressiveness),
             gpu_preference,
             progress=progress,
+            source_statistics=probe_statistics,
         )
         return output_points, output_faces
     if algorithm == "Fast QEM":
@@ -2951,6 +3040,7 @@ def simplify_process_job(
     gpu_preference: str = "system",
     progress_path: str | None = None,
     source_measurements: dict | None = None,
+    probe_statistics: dict | None = None,
 ):
     """Run native simplification outside the UI process."""
     try:
@@ -2958,7 +3048,8 @@ def simplify_process_job(
             progress_path, stage, completed, total
         )
         p_out, f_out = simplify_arrays(
-            points, faces, target, algorithm, gpu_preference=gpu_preference, progress=report
+            points, faces, target, algorithm, gpu_preference=gpu_preference, progress=report,
+            probe_statistics=probe_statistics,
         )
         metrics = mesh_quality_metrics(
             points, faces, p_out, f_out, progress=report, source_measurements=source_measurements,
@@ -3307,12 +3398,24 @@ class MainWindow(QMainWindow):
         self.update_checks_enabled = self.settings.value(
             "updates/automatic", False, type=bool
         )
+        self.auto_install_updates = self.update_checks_enabled and self.settings.value(
+            "updates/auto_install", False, type=bool)
+        self.auto_install_scope = str(self.settings.value("updates/auto_install_scope", "maintenance"))
+        self._automatic_update_in_progress = False
+        self._ready_auto_installer = None
         self.latest_release_version = ""
         self.latest_release_url = ""
         self.latest_release = {}
         self.update_check_status = "Not checked"
         self.update_future = None
         self.update_install_future = None
+        self._update_prompt_requested = False
+        self._pending_update_prompt = ""
+        self._prompted_update_versions: set[str] = set()
+        self.skipped_release_version = str(self.settings.value("updates/skipped_version", ""))
+        self.update_prompt_timer = QTimer(self)
+        self.update_prompt_timer.setInterval(500)
+        self.update_prompt_timer.timeout.connect(self._offer_startup_update)
         self.locale_preference = str(self.settings.value("interface/locale", "system"))
         self.locale_code = locale_manager.select(self._resolved_locale(self.locale_preference))
         self.appearance_theme_name = str(
@@ -3340,9 +3443,7 @@ class MainWindow(QMainWindow):
             10,
             min(
                 300,
-                300 if metrics_default_version < 2 else self.settings.value(
-                    "metrics/visible_seconds", 300, type=int
-                ),
+                self.settings.value("metrics/detail_seconds", 30, type=int),
             ),
         )
         viewport_default_version = self.settings.value(
@@ -3588,6 +3689,7 @@ class MainWindow(QMainWindow):
         self._last_diagnostic_camera_time = 0.0
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mesh-reducer")
         self.source_measurement_cache = None
+        self._probe_statistics_job = None
         self.update_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="update-check")
         self.optimization_executor = OwnedProcessPool(max_workers=1)
         self.bridge = ResultBridge()
@@ -4224,9 +4326,9 @@ class MainWindow(QMainWindow):
                 and isinstance(watched, QWidget) and watched.window() is self
                 and not self.isMaximized() and not self.isFullScreen()):
             edges = self._window_resize_edges(self.mapFromGlobal(event.globalPosition().toPoint()))
-            if edges and self.windowHandle() is not None:
-                if self.windowHandle().startSystemResize(edges):
-                    return True
+            if (edges and self.windowHandle() is not None
+                    and self.windowHandle().startSystemResize(edges)):
+                return True
         if (watched is self.vtk_widget and event.type() == QEvent.Type.MouseButtonDblClick
                 and event.button() == Qt.MouseButton.LeftButton
                 and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
@@ -4651,6 +4753,8 @@ class MainWindow(QMainWindow):
         theme = appearance_theme(self.appearance_theme_name)
         tone = str(target.property("iconTone") or "accent")
         color = theme.get(tone, theme["accent"])
+        if isinstance(target, ViewButton):
+            color = selected_control_text(theme) if target.isChecked() or target.isDown() else theme["text"]
         icon = draw_ui_icon(icon_name, color)
         if isinstance(target, QLabel):
             target.setPixmap(icon.pixmap(18, 18))
@@ -4720,7 +4824,7 @@ class MainWindow(QMainWindow):
             view_pad.setStyleSheet(
                 f"QFrame#viewPad {{ background: {theme['panel']}; border: 1px solid {theme['border']}; border-radius: 10px; }} "
                 f"QFrame#viewPad QPushButton {{ background: {theme['surface']}; color: {theme['text']}; border: 1px solid {theme['border']}; border-radius: 6px; }} "
-                f"QFrame#viewPad QPushButton:checked {{ background: {theme['accent']}; color: white; border-color: {theme['accent_hover']}; }}"
+                f"QFrame#viewPad QPushButton:checked, QFrame#viewPad QPushButton:pressed {{ background: {theme['accent']}; color: {selected_control_text(theme)}; border-color: {theme['accent_hover']}; }}"
             )
             self._apply_rounded_mask(view_pad, 10)
         loading = getattr(self, "loading_frame", None)
@@ -4775,7 +4879,7 @@ class MainWindow(QMainWindow):
         search.setPlaceholderText("Search preferences")
         search.setAccessibleName("Search preferences")
         search.setClearButtonEnabled(True)
-        outer.addWidget(search)
+        search.setMaximumWidth(220)
         no_matches = QLabel("No matching preferences", dialog)
         no_matches.setObjectName("preferencesNoMatches")
         no_matches.hide()
@@ -4806,10 +4910,38 @@ class MainWindow(QMainWindow):
         automatic_updates.setToolTip(
             "Runs one GitHub release check inside MeshMill shortly after the app opens. "
             "MeshMill does not install an updater, service, scheduled task, startup item, or "
-            "background process. Nothing runs while MeshMill is closed, and updates are never "
-            "downloaded or installed automatically."
+            "background process. Nothing runs while MeshMill is closed. A newer release prompts "
+            "you once MeshMill is idle unless automatic installation is enabled."
         )
         updates_layout.addWidget(automatic_updates)
+        auto_install = QCheckBox("Automatically install updates", dialog)
+        auto_install.setObjectName("automaticUpdateInstall")
+        auto_install.setChecked(self.auto_install_updates)
+        auto_install.setEnabled(automatic_updates.isChecked())
+        auto_install.setToolTip(
+            "Download, verify, and install updates without another confirmation when MeshMill "
+            "is idle and the mesh has no unsaved changes. Reopens the current STL after updating. "
+            "Requires startup update checking; no separate background service is installed.")
+        def sync_auto_install(enabled):
+            auto_install.setEnabled(enabled)
+            if not enabled:
+                auto_install.setChecked(False)
+        automatic_updates.toggled.connect(sync_auto_install)
+        updates_layout.addWidget(auto_install)
+        auto_install_scope = ArrowComboBox(dialog)
+        auto_install_scope.setObjectName("automaticUpdateScope")
+        auto_install_scope.addItem("Hotfixes and maintenance only", "maintenance")
+        auto_install_scope.addItem("All releases (including major)", "all")
+        auto_install_scope.setCurrentIndex(max(0, auto_install_scope.findData(self.auto_install_scope)))
+        auto_install_scope.setEnabled(auto_install.isChecked())
+        auto_install.toggled.connect(auto_install_scope.setEnabled)
+        auto_install_scope.setToolTip(
+            "Maintenance installs patch updates within the same release series, such as "
+            "0.3.2 to 0.3.3. Updates to 0.4.0 or 1.0.0 still ask first. All releases also "
+            "allows minor and major upgrades. Preview releases are excluded.")
+        automatic_scope_form = QFormLayout()
+        automatic_scope_form.addRow("Release types", auto_install_scope)
+        updates_layout.addLayout(automatic_scope_form)
         update_row = QHBoxLayout()
         check_updates_button = QPushButton("Check now", dialog)
         check_updates_button.setProperty("quiet", True)
@@ -4817,16 +4949,36 @@ class MainWindow(QMainWindow):
             "Check GitHub once for a newer MeshMill release. This does not change the automatic setting."
         )
         updates_status = QLabel(self.update_check_status, dialog)
-        updates_status.setStyleSheet("color: #6B7280;")
+        updates_status.setProperty("muted", True)
+        install_update_button = QPushButton("Install update", dialog)
+        install_update_button.setObjectName("installUpdateButton")
         update_row.addWidget(check_updates_button)
+        update_row.addWidget(install_update_button)
         update_row.addWidget(updates_status, 1)
         updates_layout.addLayout(update_row)
 
         def refresh_update_status() -> None:
             updates_status.setText(self.update_check_status)
             check_updates_button.setEnabled(self.update_future is None)
+            available = self._update_available()
+            install_update_button.setVisible(available)
+            install_update_button.setEnabled(
+                available and not self.busy and self.update_install_future is None
+            )
+            installable = update_asset_for_current_platform(self.latest_release)
+            install_update_button.setText(
+                f"Install {self.latest_release_version}" if installable
+                else "Open downloads"
+            )
+            install_update_button.setToolTip(
+                "Download and verify the update, then install it and reopen the current STL. "
+                "Save changes and finish or cancel the current operation first."
+                if installable else "Open the release downloads for your operating system."
+            )
 
         check_updates_button.clicked.connect(lambda: self._check_for_updates(force=True))
+        install_update_button.clicked.connect(self._install_latest_release)
+        refresh_update_status()
         updates_timer = QTimer(dialog)
         updates_timer.setInterval(250)
         updates_timer.timeout.connect(refresh_update_status)
@@ -4844,6 +4996,43 @@ class MainWindow(QMainWindow):
         language.setToolTip("Application language.")
         form.addRow("Language", language)
 
+        open_mode = ArrowComboBox(dialog)
+        open_mode.setObjectName("fileOpenMode")
+        for label, value in (("Remember last folder", "last"),
+                             ("Smart open (parent of last folder)", "smart"),
+                             ("Specific folder", "fixed")):
+            open_mode.addItem(label, value)
+        open_mode.setCurrentIndex(max(0, open_mode.findData(
+            self.settings.value("files/open_mode", "last"))))
+        open_mode.setToolTip("Choose the starting folder for the Open STL dialog.")
+        form.addRow("File open mode", open_mode)
+        open_folder_row = QWidget(dialog)
+        open_folder_layout = QHBoxLayout(open_folder_row)
+        open_folder_layout.setContentsMargins(0, 0, 0, 0)
+        open_folder = QLineEdit(str(self.settings.value("files/open_folder", "")), dialog)
+        open_folder.setObjectName("fileOpenFolder")
+        browse_open_folder = QPushButton("Browse…", dialog)
+        def choose_open_folder():
+            chosen = QFileDialog.getExistingDirectory(dialog, "Choose opening folder", open_folder.text())
+            if chosen:
+                open_folder.setText(chosen)
+        browse_open_folder.clicked.connect(choose_open_folder)
+        open_folder_layout.addWidget(open_folder, 1)
+        open_folder_layout.addWidget(browse_open_folder)
+        open_folder_row.setEnabled(open_mode.currentData() == "fixed")
+        open_mode.currentIndexChanged.connect(
+            lambda _: open_folder_row.setEnabled(open_mode.currentData() == "fixed"))
+        form.addRow("Opening folder", open_folder_row)
+        if platform.system().lower() == "windows":
+            associate_stl = QPushButton("Choose default app…", dialog)
+            associate_stl.setObjectName("stlAssociationSettings")
+            associate_stl.setToolTip(
+                "Open Windows default-app settings to choose the app for .stl files. "
+                "Installing MeshMill adds Open With without replacing your current default. "
+                "No default changes until you choose one in Windows.")
+            associate_stl.clicked.connect(self._open_stl_association_settings)
+            form.addRow("STL file association", associate_stl)
+
         appearance = ArrowComboBox(dialog)
         for appearance_name in APPEARANCE_THEMES:
             appearance.addItem(appearance_name, appearance_name)
@@ -4854,10 +5043,10 @@ class MainWindow(QMainWindow):
             "Changes MeshMill window colors, panel contrast, and controls. It does not change "
             "tools, layout, or mesh behavior."
         )
-        form.addRow("Appearance", appearance)
+        form.addRow("Theme", appearance)
 
         viewport_appearance = ArrowComboBox(dialog)
-        viewport_appearance.addItem("Match window", "match")
+        viewport_appearance.addItem("Match theme", "match")
         for appearance_name in APPEARANCE_THEMES:
             viewport_appearance.addItem(appearance_name, appearance_name)
         viewport_appearance.addItem("Custom", "custom")
@@ -4865,10 +5054,10 @@ class MainWindow(QMainWindow):
             max(0, viewport_appearance.findData(self.viewport_appearance_name))
         )
         viewport_appearance.setToolTip(
-            "Sets the viewport background and its floating controls. Match window uses the "
+            "Sets the viewport background and its floating controls. Match theme uses the "
             "same palette as the rest of MeshMill."
         )
-        form.addRow("Viewport appearance", viewport_appearance)
+        form.addRow("Viewport", viewport_appearance)
 
         gradient_colors = QWidget(dialog)
         gradient_row = QHBoxLayout(gradient_colors)
@@ -4907,11 +5096,15 @@ class MainWindow(QMainWindow):
         gradient_row.addWidget(left_gradient_button)
         gradient_row.addWidget(right_gradient_button)
         form.addRow("Density gradient", gradient_colors)
+        gradient_label = form.labelForField(gradient_colors)
 
         def sync_custom_gradient_visibility() -> None:
-            gradient_colors.setVisible(viewport_appearance.currentData() == "custom")
+            custom = viewport_appearance.currentData() == "custom"
+            gradient_colors.setVisible(custom)
+            gradient_label.setVisible(custom)
 
         gradient_colors._preferences_search_allowed = lambda: viewport_appearance.currentData() == "custom"
+        gradient_label._preferences_search_allowed = gradient_colors._preferences_search_allowed
 
         viewport_appearance.currentIndexChanged.connect(sync_custom_gradient_visibility)
         refresh_gradient_buttons()
@@ -5045,20 +5238,21 @@ class MainWindow(QMainWindow):
             max(0, metrics_history.findData(self.metrics_history_minutes))
         )
         metrics_history.setToolTip(
-            "How long the scrollable CPU and GPU graph stays available during this session."
+            "How long CPU and GPU readings stay available. Recent readings are shown in detail; "
+            "older readings are grouped into averages with their minimum and peak usage preserved."
         )
         metrics_form.addRow("Keep history", metrics_history)
         metrics_timeline = ArrowComboBox(dialog)
         for seconds in (10, 30, 60, 120, 300):
-            metrics_timeline.addItem(f"{seconds} seconds visible", seconds)
+            metrics_timeline.addItem(f"{seconds} seconds", seconds)
         metrics_timeline.setCurrentIndex(
             max(0, metrics_timeline.findData(self.metrics_visible_seconds))
         )
         metrics_timeline.setToolTip(
-            "The live width of the graph. Older retained samples stay available through the "
-            "horizontal scrollbar."
+            "The recent time range shown in full detail on the right. Older history is "
+            "progressively compressed toward the left. A shorter range zooms in and enables scrolling."
         )
-        metrics_form.addRow("Timeline zoom", metrics_timeline)
+        metrics_form.addRow("Recent detail", metrics_timeline)
         metrics_memory = QLabel(dialog)
         metrics_memory.setProperty("muted", True)
 
@@ -5066,7 +5260,7 @@ class MainWindow(QMainWindow):
             refresh = int(metrics_refresh.currentData() or 500)
             minutes = int(metrics_history.currentData() or 15)
             samples = math.ceil(minutes * 60_000 / refresh)
-            estimated_bytes = samples * 96
+            estimated_bytes = samples * 160 + min(samples, 1600) * 320
             metrics_memory.setText(
                 f"{samples:,} samples, about {fmt_bytes(estimated_bytes)} RAM"
             )
@@ -5509,11 +5703,10 @@ class MainWindow(QMainWindow):
             shortcut_edits[shortcut_id] = editor
         shortcuts_layout.addLayout(shortcut_grid)
 
-        reset_layout = section("Reset")
-        reset_all_button = QPushButton("Reset all settings", dialog)
-        reset_all_button.setProperty("preferenceSearchName", "Reset all settings")
+        reset_all_button = QPushButton("Reset", dialog)
+        reset_all_button.setObjectName("preferencesReset")
+        reset_all_button.setToolTip("Reset all settings to defaults after confirmation. Save to apply.")
         reset_all_button.setProperty("quiet", True)
-        reset_layout.addWidget(reset_all_button)
         reset_all_requested = {"value": False}
 
         def reset_all() -> None:
@@ -5527,7 +5720,10 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
             reset_all_requested["value"] = True
+            open_mode.setCurrentIndex(open_mode.findData("last"))
+            open_folder.clear()
             automatic_updates.setChecked(False)
+            auto_install_scope.setCurrentIndex(auto_install_scope.findData("maintenance"))
             language.setCurrentIndex(language.findData("system"))
             appearance.setCurrentIndex(appearance.findData(DEFAULT_APPEARANCE))
             viewport_appearance.setCurrentIndex(
@@ -5567,10 +5763,15 @@ class MainWindow(QMainWindow):
         scroll.setWidget(content)
         outer.addWidget(scroll, 1)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
-            parent=dialog,
-        )
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        footer.addWidget(search)
+        save_settings_button = QPushButton("Save", dialog)
+        save_settings_button.setDefault(True)
+        cancel_settings_button = QPushButton("Cancel", dialog)
+        footer.addWidget(save_settings_button)
+        footer.addWidget(reset_all_button)
+        footer.addWidget(cancel_settings_button)
         def accept_settings() -> None:
             assignments: dict[str, set[str]] = {}
             for shortcut_id, editor in shortcut_edits.items():
@@ -5587,9 +5788,9 @@ class MainWindow(QMainWindow):
                 return
             dialog.accept()
 
-        buttons.accepted.connect(accept_settings)
-        buttons.rejected.connect(dialog.reject)
-        outer.addWidget(buttons)
+        save_settings_button.clicked.connect(accept_settings)
+        cancel_settings_button.clicked.connect(dialog.reject)
+        outer.addLayout(footer)
         localize_widget_tree(dialog)
         def filter_settings(query: str) -> None:
             no_matches.setVisible(filter_preferences_sections(sections, query) == 0)
@@ -5603,6 +5804,8 @@ class MainWindow(QMainWindow):
         if reset_all_requested["value"]:
             self.settings.clear()
         self.locale_preference = str(language.currentData() or "system")
+        self.settings.setValue("files/open_mode", open_mode.currentData())
+        self.settings.setValue("files/open_folder", open_folder.text().strip())
         self.appearance_theme_name = str(
             appearance.currentData() or DEFAULT_APPEARANCE
         )
@@ -5622,9 +5825,11 @@ class MainWindow(QMainWindow):
         self.font_size_position = font_size.value()
         self.metrics_refresh_ms = int(metrics_refresh.currentData() or 1000)
         self.metrics_history_minutes = int(metrics_history.currentData() or 15)
-        self.metrics_visible_seconds = int(metrics_timeline.currentData() or 300)
+        self.metrics_visible_seconds = int(metrics_timeline.currentData() or 30)
         previous_update_setting = self.update_checks_enabled
         self.update_checks_enabled = automatic_updates.isChecked()
+        self.auto_install_updates = self.update_checks_enabled and auto_install.isChecked()
+        self.auto_install_scope = str(auto_install_scope.currentData() or "maintenance")
         self.locale_code = locale_manager.select(self._resolved_locale(self.locale_preference))
         self.default_units = default_units.currentText()
         self.startup_algorithm = str(startup_algorithm.currentData() or "last")
@@ -5684,6 +5889,8 @@ class MainWindow(QMainWindow):
 
         self.settings.setValue("interface/tools_side", self.tools_side)
         self.settings.setValue("updates/automatic", self.update_checks_enabled)
+        self.settings.setValue("updates/auto_install", self.auto_install_updates)
+        self.settings.setValue("updates/auto_install_scope", self.auto_install_scope)
         self.settings.setValue("interface/locale", self.locale_preference)
         self.settings.setValue("interface/appearance_theme", self.appearance_theme_name)
         self.settings.setValue("interface/viewport_appearance", self.viewport_appearance_name)
@@ -5700,6 +5907,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("interface/font_size_position", self.font_size_position)
         self.settings.setValue("metrics/refresh_ms", self.metrics_refresh_ms)
         self.settings.setValue("metrics/history_minutes", self.metrics_history_minutes)
+        self.settings.setValue("metrics/detail_seconds", self.metrics_visible_seconds)
         self.settings.setValue("metrics/visible_seconds", self.metrics_visible_seconds)
         self.settings.setValue("metrics/default_version", 2)
         self.settings.setValue("performance/gpu_preference", self.gpu_preference)
@@ -5848,7 +6056,11 @@ class MainWindow(QMainWindow):
         self.geometry_activity_graph.configure_history(
             self.metrics_refresh_ms, self.metrics_history_minutes, self.metrics_visible_seconds
         )
-        self.geometry_activity_graph.setToolTip("CPU, GPU, and geometry activity.")
+        self.geometry_activity_graph.setToolTip(
+            "Recent readings are detailed on the right. Older readings are progressively "
+            "grouped toward the left. Lines show sampled averages; vertical ranges preserve "
+            "minimum and peak usage. Shading marks geometry processing."
+        )
         history_controls = QHBoxLayout()
         self.metrics_timeline_label = QLabel()
         self.metrics_timeline_label.setProperty("muted", True)
@@ -5898,15 +6110,17 @@ class MainWindow(QMainWindow):
         label = getattr(self, "metrics_timeline_label", None)
         if label is not None:
             label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            label.setText(f"Timeline: {self.metrics_visible_seconds} s")
+            label.setText(f"Detail: {self.metrics_visible_seconds} s")
         self._follow_latest_metrics_history()
 
     def _pause_metrics_follow(self) -> None:
         self.metrics_timeline_dragging = True
         self.metrics_follow_latest = False
+        self.geometry_activity_graph.set_paused(True)
 
     def _metrics_timeline_moved(self, _position: int) -> None:
         self.metrics_follow_latest = False
+        self.geometry_activity_graph.set_paused(True)
 
     def _resume_metrics_follow_if_latest(self) -> None:
         self.metrics_timeline_dragging = False
@@ -5915,6 +6129,7 @@ class MainWindow(QMainWindow):
             return
         bar = scroll.horizontalScrollBar()
         self.metrics_follow_latest = bar.value() >= bar.maximum() - 1
+        self.geometry_activity_graph.set_paused(not self.metrics_follow_latest)
         self._follow_latest_metrics_history()
 
     def _follow_latest_metrics_history(self) -> None:
@@ -5934,7 +6149,7 @@ class MainWindow(QMainWindow):
         index = max(0, min(len(levels) - 1, index + direction))
         self.metrics_visible_seconds = levels[index]
         self._configure_metrics_history()
-        self.settings.setValue("metrics/visible_seconds", self.metrics_visible_seconds)
+        self.settings.setValue("metrics/detail_seconds", self.metrics_visible_seconds)
 
     def _toggle_metrics(self, visible: bool) -> None:
         self.metrics_frame.setVisible(visible)
@@ -6873,6 +7088,9 @@ class MainWindow(QMainWindow):
             button = ViewButton(label, self.view_pad)
             self._set_theme_icon(button, "view-" + direction)
             button.setCheckable(True)
+            button.toggled.connect(lambda _, b=button, d=direction: self._apply_theme_icon(b, "view-" + d))
+            button.pressed.connect(lambda b=button, d=direction: self._apply_theme_icon(b, "view-" + d))
+            button.released.connect(lambda b=button, d=direction: self._apply_theme_icon(b, "view-" + d))
             button.clicked.connect(lambda _=False, d=direction: self._set_standard_view(d))
             button.orientationRequested.connect(lambda d=direction: self._set_current_view_as(d))
             grid.addWidget(button, row, column)
@@ -6956,6 +7174,26 @@ class MainWindow(QMainWindow):
         right /= max(float(np.linalg.norm(right)), 1e-12)
         self.orientation_reference_basis = np.column_stack((right, up, forward))
 
+    def _establish_opening_front(self) -> None:
+        """Use the opening camera frame as this mesh's fixed view reference."""
+        camera = self.renderer.GetActiveCamera()
+        front = np.asarray(camera.GetPosition()) - np.asarray(camera.GetFocalPoint())
+        front /= max(float(np.linalg.norm(front)), 1e-12)
+        up = np.asarray(camera.GetViewUp(), dtype=float)
+        up -= front * float(up @ front)
+        up /= max(float(np.linalg.norm(up)), 1e-12)
+        left = np.cross(front, up)
+        self.saved_standard_views = {
+            "front": (front.copy(), up.copy()),
+            "back": (-front, up.copy()),
+            "left": (left, up.copy()),
+            "right": (-left, up.copy()),
+            "top": (up.copy(), front.copy()),
+            "bottom": (-up, front.copy()),
+        }
+        self._set_orientation_reference(camera)
+        self._update_orientation_indicator()
+
     def _update_scale_bar(self, camera=None) -> None:
         if not hasattr(self, "scale_bar") or self.source_poly is None:
             if hasattr(self, "scale_bar"):
@@ -6991,6 +7229,10 @@ class MainWindow(QMainWindow):
 
     def _update_active_view_button(self, camera=None) -> None:
         if not hasattr(self, "view_buttons"):
+            return
+        if self.source_poly is None:
+            for button in self.view_buttons.values():
+                button.setChecked(False)
             return
         camera = camera or self.renderer.GetActiveCamera()
         position = np.asarray(camera.GetPosition(), dtype=float)
@@ -7037,6 +7279,36 @@ class MainWindow(QMainWindow):
                 self.scale_bar.hide()
             self.scale_bar.raise_()
 
+    def _fit_view_bounds(self, bounds) -> None:
+        """Fit projected bounds with a three-percent margin on each viewport edge."""
+        camera = self.renderer.GetActiveCamera()
+        corners = np.array([(x, y, z) for x in bounds[:2]
+                            for y in bounds[2:4] for z in bounds[4:6]], dtype=float)
+        center = (corners.min(axis=0) + corners.max(axis=0)) / 2
+        view = np.asarray(camera.GetPosition()) - np.asarray(camera.GetFocalPoint())
+        view /= max(float(np.linalg.norm(view)), 1e-12)
+        up = np.asarray(camera.GetViewUp(), dtype=float)
+        up -= view * float(up @ view)
+        up /= max(float(np.linalg.norm(up)), 1e-12)
+        right = np.cross(up, view)
+        offsets = corners - center
+        x, y, z = offsets @ right, offsets @ up, offsets @ view
+        aspect = max(float(self.renderer.GetTiledAspectRatio()), 1e-9)
+        usable = .94
+        if camera.GetParallelProjection():
+            camera.SetParallelScale(max(float(np.max(np.abs(y))),
+                                        float(np.max(np.abs(x))) / aspect, 1e-9) / usable)
+            distance = max(float(np.linalg.norm(camera.GetPosition() - center)),
+                           float(np.max(z)) + 1)
+        else:
+            tangent = math.tan(math.radians(camera.GetViewAngle()) / 2)
+            tan_x, tan_y = ((tangent, tangent / aspect) if camera.GetUseHorizontalViewAngle()
+                            else (tangent * aspect, tangent))
+            distance = max(float(np.max(z + np.abs(x) / (tan_x * usable))),
+                           float(np.max(z + np.abs(y) / (tan_y * usable))), 1e-9)
+        camera.SetFocalPoint(*center)
+        camera.SetPosition(*(center + view * distance))
+
     def _set_standard_view(self, direction: str) -> None:
         if direction not in STANDARD_VIEWS:
             return
@@ -7046,6 +7318,8 @@ class MainWindow(QMainWindow):
         elif self.source_poly is not None:
             bounds = self.source_poly.GetBounds()
         else:
+            for button in self.view_buttons.values():
+                button.setChecked(False)
             return
         center = np.asarray(
             ((bounds[0] + bounds[1]) / 2, (bounds[2] + bounds[3]) / 2, (bounds[4] + bounds[5]) / 2)
@@ -7066,6 +7340,7 @@ class MainWindow(QMainWindow):
         self.renderer.ResetCamera(*bounds)
         camera.SetViewUp(*view_up)
         camera.OrthogonalizeViewUp()
+        self._fit_view_bounds(bounds)
         self._set_orientation_reference(camera)
         self.renderer.ResetCameraClippingRange()
         self.vtk_widget.GetRenderWindow().Render()
@@ -7375,6 +7650,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "_background_workers_stopped", False):
             return
         self._closing = True
+        self.update_prompt_timer.stop()
         if self.operation_cancel_event is not None:
             self.operation_cancel_event.set()
         if self.operation_future is not None:
@@ -7392,8 +7668,36 @@ class MainWindow(QMainWindow):
         self.vtk_widget.Finalize()
         super().closeEvent(event)
 
+    def _open_stl_association_settings(self) -> None:
+        if platform.system().lower() != "windows":
+            return
+        url = "ms-settings:defaultapps"
+        if getattr(sys, "frozen", False):
+            import winreg
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\RegisteredApplications") as key:
+                    winreg.QueryValueEx(key, APP_NAME)
+                url += "?registeredAppUser=" + APP_NAME
+            except OSError:
+                pass
+        if not QDesktopServices.openUrl(QUrl(url)):
+            QMessageBox.warning(self, APP_NAME,
+                                "Open Windows Settings > Apps > Default apps and search for .stl.")
+
+    def _file_open_directory(self) -> str:
+        mode = self.settings.value("files/open_mode", "last")
+        last = str(self.settings.value("files/last_open_folder", ""))
+        if not last and self.source_path is not None:
+            last = os.fspath(self.source_path.parent)
+        chosen = (str(self.settings.value("files/open_folder", "")) if mode == "fixed"
+                  else os.fspath(Path(last).parent) if mode == "smart" and last else last)
+        folder = Path(chosen) if chosen else Path.home() / "Documents"
+        while not folder.is_dir() and folder != folder.parent:
+            folder = folder.parent
+        return os.fspath(folder)
+
     def open_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Open scan", "", "STL mesh (*.stl)")
+        path, _ = QFileDialog.getOpenFileName(self, "Open STL", self._file_open_directory(), "STL mesh (*.stl)")
         if path:
             self.load_path(Path(path))
 
@@ -7408,7 +7712,7 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setText(os.fspath(self.source_path))
         self.status.setText("STL path copied")
 
-    def load_path(self, path: Path) -> None:
+    def load_path(self, path: Path, *, restore_opening_view: bool = False) -> None:
         if self.busy:
             self.status.setText("Finish the current operation before loading another mesh.")
             return
@@ -7419,6 +7723,10 @@ class MainWindow(QMainWindow):
             self.status.setText("Load failed.")
             return
 
+        self._reload_opening_camera = (
+            getattr(self, "_original_opening_camera", None) if restore_opening_view else None
+        )
+        self._probe_statistics_job = None
         self._capture_operation_snapshot()
         self._cancel_crop(None)
         self.timer.stop()
@@ -7488,7 +7796,7 @@ class MainWindow(QMainWindow):
             try:
                 poly, points, faces, metadata = result_future.result()
                 self.load_geometry_ready = True
-                if self.gpu_warmup_future is not None:
+                if self.gpu_warmup_future is not None and self.gpu_warmup_future.done():
                     metadata = dict(metadata or {})
                     try:
                         metadata["gpu_setup"] = self.gpu_warmup_future.result()
@@ -7520,7 +7828,6 @@ class MainWindow(QMainWindow):
             return
         self.loading = False
         self.load_geometry_ready = False
-        self.gpu_warmup_future = None
         self._end_mesh_operation()
         if error is not None or poly is None or points is None or faces is None:
             QMessageBox.critical(self, APP_NAME, f"Could not load the STL:\n\n{error}")
@@ -7528,6 +7835,7 @@ class MainWindow(QMainWindow):
             return
 
         self.source_path = path
+        self.settings.setValue("files/last_open_folder", os.fspath(path.resolve().parent))
         self.source_poly = poly
         self.source_points = points
         self.source_faces = faces
@@ -7555,6 +7863,7 @@ class MainWindow(QMainWindow):
             self.measure_info_frame.hide()
         self.mesh_modified = False
         self.saved_standard_views.clear()
+        self._opening_front_pending = True
         self.orientation_reference_basis = None
         self.has_committed_optimization = False
         self.optimization_script_passes.clear()
@@ -7614,6 +7923,7 @@ class MainWindow(QMainWindow):
         self._update_estimated_size()
         self._update_processing_plan()
         self._show_poly(poly, prepared=metadata.get("render_poly") if metadata else None)
+        QTimer.singleShot(500, self._precache_source_analysis)
         self.timer.stop()
         self.status.setText(
             f"Overview • {fmt_count(len(faces))} sampled of "
@@ -8157,7 +8467,7 @@ class MainWindow(QMainWindow):
                 faces = np.ascontiguousarray(inverse.reshape(-1, 3), dtype=np.int32)
                 return {"kind": "connected-selection", "previous": previous, "candidate":
                         (arrays_polydata(points, faces), points, faces, mask)}
-            except Exception:
+            except Exception:  # noqa: BLE001 - worker boundary returns the failure to the GUI
                 return {"error": traceback.format_exc()}
 
         future = self.executor.submit(job)
@@ -8791,7 +9101,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         self._cancel_crop(None)
-        self.load_path(self.source_path)
+        self.load_path(self.source_path, restore_opening_view=True)
 
     def _capture_history_state(self) -> MeshHistoryState:
         return MeshHistoryState(
@@ -8866,6 +9176,7 @@ class MainWindow(QMainWindow):
         self._reset_previous_view()
         self.generation += 1
         self.pending_target = None
+        self._probe_statistics_job = None
         self.source_poly = poly
         self.source_points = points
         self.source_faces = faces
@@ -8907,6 +9218,7 @@ class MainWindow(QMainWindow):
         self._update_dimension_labels()
         self._update_estimated_size()
         self._show_poly(poly)
+        QTimer.singleShot(500, self._precache_source_analysis)
         self._reset_previous_view()
         self.status.setText(f"{message} • {fmt_count(len(faces))} triangles")
 
@@ -9195,6 +9507,7 @@ class MainWindow(QMainWindow):
                 self.algorithm.setCurrentText("Density balanced")
             _algorithm = "Density balanced"
         self.last_algorithm = _algorithm
+        QTimer.singleShot(500, self._precache_source_analysis)
         self.settings.setValue("optimization/last_algorithm", _algorithm)
         if self.source_faces is None:
             return
@@ -9339,6 +9652,7 @@ class MainWindow(QMainWindow):
             self.gpu_preference,
             progress_path,
             self._cached_source_measurements(points, faces),
+            self._cached_probe_statistics(points, faces),
         )
         self.operation_future = future
 
@@ -9429,7 +9743,7 @@ class MainWindow(QMainWindow):
         def completed(result_future) -> None:
             try:
                 result = result_future.result()
-            except Exception:
+            except Exception:  # noqa: BLE001 - Future errors are reported on the GUI thread
                 result = (None, None, None, traceback.format_exc())
             self._emit_prepared_simplify_result(generation, result, progress_path)
 
@@ -9446,7 +9760,7 @@ class MainWindow(QMainWindow):
                 prepared = prepare_viewport_poly(poly, lambda stage, done, total:
                     _write_process_progress(progress_path, stage, done, total))
                 prepared_viewport = (poly, prepared)
-            except Exception:
+            except Exception:  # noqa: BLE001 - viewport preparation reports through the result bridge
                 error = traceback.format_exc()
         self.bridge.done.emit(generation, points, faces, metrics, error, prepared_viewport)
 
@@ -9944,6 +10258,34 @@ class MainWindow(QMainWindow):
         self._show_loupe(True)
         QTimer.singleShot(250, lambda: self._capture_and_exit(path))
 
+    def _precache_source_analysis(self) -> None:
+        if getattr(self, "_closing", False):
+            return
+        if self.busy:
+            QTimer.singleShot(500, self._precache_source_analysis)
+            return
+        if (self.source_points is None or self.source_faces is None or self.tiled_mode
+                or not is_gpu_guided_algorithm(self.algorithm.currentText())):
+            return
+        points, faces = self.source_points, self.source_faces
+        cached = getattr(self, "_probe_statistics_job", None)
+        if cached is not None and cached[0] is points and cached[1] is faces:
+            return
+        # Bound speculative allocations and use the existing single CPU worker.
+        if available_physical_memory() < min(len(faces), 1_000_000) * 256:
+            return
+        self._probe_statistics_job = (points, faces,
+                                      self.executor.submit(probe_source_statistics, points, faces))
+
+    def _cached_probe_statistics(self, points, faces):
+        cached = getattr(self, "_probe_statistics_job", None)
+        if cached is not None and cached[0] is points and cached[1] is faces and cached[2].done():
+            try:
+                return cached[2].result()
+            except Exception:  # noqa: BLE001 - optional preparation falls back to the normal path
+                return None
+        return None
+
     def _cached_source_measurements(self, points, faces):
         cached = self.source_measurement_cache
         if cached is not None and cached[0] is points and cached[1] is faces:
@@ -9979,10 +10321,9 @@ class MainWindow(QMainWindow):
             self.pending_density_poly = poly
             self.density_legend.setVisible(self._overlay_is_visible("density"))
             self.density_legend.raise_()
-            self.renderer.RemoveAllViewProps()
-            self.preview_actor = None
-            self.active_actor = None
-            self.vtk_widget.GetRenderWindow().Render()
+            # Establish the same framing as other modes before asynchronous coloring.
+            self._set_actor_display_mode(actor)
+            self._show_cached_actor(actor, reset_camera)
             QTimer.singleShot(0, lambda requested=poly: self._request_density_analysis(requested))
             return
         self.pending_density_poly = None
@@ -10008,6 +10349,18 @@ class MainWindow(QMainWindow):
             self.renderer.ResetCamera()
             self.renderer.GetActiveCamera().Zoom(1.28)
             self.renderer.ResetCameraClippingRange()
+        if actor is self.source_actor and getattr(self, "_opening_front_pending", False):
+            self._opening_front_pending = False
+            camera = self.renderer.GetActiveCamera()
+            opening = getattr(self, "_reload_opening_camera", None)
+            if opening is not None:
+                camera.DeepCopy(opening)
+            else:
+                self._original_opening_camera = camera.NewInstance()
+                self._original_opening_camera.DeepCopy(camera)
+            self._reload_opening_camera = None
+            self.renderer.ResetCameraClippingRange()
+            self._establish_opening_front()
         self._update_measure_overlay(render=False)
         self.vtk_widget.GetRenderWindow().Render()
         resident = inspect_resident_vertices(actor)
@@ -10260,10 +10613,16 @@ class MainWindow(QMainWindow):
             self.save_file()
 
     def _check_for_updates(self, force: bool = False) -> None:
+        if getattr(self, "_closing", False):
+            return
         if not force and not self.update_checks_enabled:
             return
         if self.update_future is not None:
             return
+        self._update_prompt_requested = not force
+        if force:
+            self._pending_update_prompt = ""
+            self.update_prompt_timer.stop()
         self.update_check_status = "Checking…"
         self.version_label.setText("Checking for updates…")
         self.version_label.setEnabled(False)
@@ -10284,6 +10643,10 @@ class MainWindow(QMainWindow):
 
     def _finish_update_check(self, release, release_url, error) -> None:
         self.update_future = None
+        prompt_requested = self._update_prompt_requested
+        self._update_prompt_requested = False
+        if getattr(self, "_closing", False):
+            return
         version = release.get("version") if isinstance(release, dict) else None
         if error is not None or not version or not release_url:
             self.update_check_status = "Could not check GitHub"
@@ -10297,6 +10660,58 @@ class MainWindow(QMainWindow):
         else:
             self.update_check_status = "MeshMill is up to date"
         self._update_update_action()
+        if (prompt_requested and self.update_checks_enabled and self._update_available()
+                and self.latest_release_version != self.skipped_release_version
+                and self.latest_release_version not in self._prompted_update_versions):
+            self._pending_update_prompt = self.latest_release_version
+            self.update_prompt_timer.start()
+
+    def _update_available(self) -> bool:
+        return (bool(self.latest_release_url)
+                and version_key(self.latest_release_version) > version_key(APP_VERSION))
+
+    def _offer_startup_update(self) -> None:
+        if self._ready_auto_installer is not None:
+            if not self._auto_install_release_allowed() or not self.update_checks_enabled:
+                self._automatic_update_in_progress = False
+                self.update_prompt_timer.stop()
+            elif self._can_auto_install_update():
+                installer = self._ready_auto_installer
+                self._ready_auto_installer = None
+                self.update_prompt_timer.stop()
+                self._finish_update_download(installer, None)
+            return
+        version = self._pending_update_prompt
+        if (getattr(self, "_closing", False) or not self.update_checks_enabled
+                or not version or not self._update_available()
+                or version != self.latest_release_version
+                or version == self.skipped_release_version
+                or version in self._prompted_update_versions):
+            self._pending_update_prompt = ""
+            self.update_prompt_timer.stop()
+            return
+        if self.busy or QApplication.activeModalWidget() is not None:
+            return
+        automatic = self._auto_install_release_allowed()
+        if automatic and not self._can_auto_install_update():
+            return
+        self._pending_update_prompt = ""
+        self.update_prompt_timer.stop()
+        self._install_latest_release(automatic=automatic)
+
+    def _auto_install_release_allowed(self) -> bool:
+        if not self.auto_install_updates:
+            return False
+        if self.auto_install_scope == "all":
+            return True
+        current = (*version_key(APP_VERSION), 0, 0)
+        latest = (*version_key(self.latest_release_version), 0, 0)
+        return current[:2] == latest[:2]
+
+    def _can_auto_install_update(self) -> bool:
+        return (not getattr(self, "_closing", False) and self.update_checks_enabled
+                and self._auto_install_release_allowed() and not self.busy and not self.mesh_modified
+                and QApplication.activeModalWidget() is None)
 
     def _update_update_action(self) -> None:
         update_available = (
@@ -10345,28 +10760,28 @@ class MainWindow(QMainWindow):
         if self.latest_release_url:
             QDesktopServices.openUrl(QUrl(self.latest_release_url))
 
-    def _install_latest_release(self) -> None:
+    def _install_latest_release(self, automatic: bool = False) -> None:
+        if (getattr(self, "_closing", False) or not self._update_available()
+                or self.update_install_future is not None or self.busy):
+            return
         asset = update_asset_for_current_platform(self.latest_release)
-        if asset is None or not getattr(sys, "frozen", False):
+        installable = asset is not None and getattr(sys, "frozen", False)
+        if automatic and (not installable or not self._can_auto_install_update()):
+            return
+        self._prompted_update_versions.add(self.latest_release_version)
+        self._pending_update_prompt = ""
+        self.update_prompt_timer.stop()
+        choice = "install" if automatic else self._confirm_update_install(installable)
+        if choice == "skip":
+            self.skipped_release_version = self.latest_release_version
+            self.settings.setValue("updates/skipped_version", self.skipped_release_version)
+            return
+        if choice != "install":
+            return
+        if not installable:
             self._open_latest_release()
             return
-        if self.update_install_future is not None:
-            return
-        answer = QMessageBox.question(
-            self,
-            "Install MeshMill update",
-            f"Install MeshMill {self.latest_release_version}?\n\n"
-            "The package will be verified, MeshMill will close, and the open STL "
-            "will reopen after the upgrade."
-            + (
-                "\n\nThe current mesh has unapplied or unsaved changes. Save it before "
-                "continuing if you want to keep them."
-                if self.mesh_modified
-                else ""
-            ),
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
+        self._automatic_update_in_progress = automatic
         update_dir = (
             Path(tempfile.gettempdir()) / "MeshMill" / "updates" / self.latest_release_version
         )
@@ -10389,12 +10804,51 @@ class MainWindow(QMainWindow):
 
         future.add_done_callback(completed)
 
+    def _confirm_update_install(self, installable: bool) -> str:
+        prompt = QMessageBox(QApplication.activeModalWidget() or self)
+        prompt.setWindowTitle("MeshMill update")
+        prompt.setIcon(QMessageBox.Icon.Information)
+        prompt.setText(
+            (f"Install MeshMill {self.latest_release_version}?\n\n"
+             "The package will be verified, MeshMill will close, and the open STL "
+             "will reopen after the upgrade."
+             if installable else
+             f"MeshMill {self.latest_release_version} is available. Open the release downloads?")
+            + (
+                "\n\nThe current mesh has unapplied or unsaved changes. Save it before "
+                "continuing if you want to keep them."
+                if self.mesh_modified
+                else ""
+            )
+        )
+        install = prompt.addButton(
+            "Install now" if installable else "Open downloads", QMessageBox.ButtonRole.AcceptRole
+        )
+        remind = prompt.addButton("Remind me next time", QMessageBox.ButtonRole.RejectRole)
+        skip = prompt.addButton("Skip this version", QMessageBox.ButtonRole.NoRole)
+        remind.setToolTip("Ask again on the next app launch if startup checks are enabled.")
+        skip.setToolTip("Stop startup reminders for this version. Settings can still install it.")
+        prompt.setDefaultButton(remind)
+        prompt.setEscapeButton(remind)
+        prompt.exec()
+        if prompt.clickedButton() == install:
+            return "install"
+        if prompt.clickedButton() == skip:
+            return "skip"
+        return "remind"
+
     def _finish_update_download(self, installer: Path | None, error) -> None:
         self.update_install_future = None
         if error is not None or installer is None:
+            self._automatic_update_in_progress = False
             self.update_check_status = "Update download failed"
             self._update_update_action()
             QMessageBox.warning(self, APP_NAME, f"The update was not installed.\n\n{error}")
+            return
+        if self._automatic_update_in_progress and not self._can_auto_install_update():
+            self._ready_auto_installer = installer
+            self.update_check_status = "Update downloaded; waiting for saved work and idle state"
+            self.update_prompt_timer.start()
             return
         reopen = os.fspath(self.source_path) if self.source_path is not None else ""
         if platform.system().lower() == "windows":
@@ -10734,6 +11188,12 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    preserved_workers = tuple(int(value) for value in
+                              os.environ.get("MESHMILL_PRESERVE_WORKER_PIDS", "").split(",")
+                              if value.strip().isdecimal())
+    threading.Thread(target=recover_orphan_workers,
+                     kwargs={"excluded_pids": preserved_workers},
+                     name="worker-recovery", daemon=True).start()
     cli_name = Path(sys.executable).stem.lower().endswith("cli")
     if "--cli" in sys.argv or cli_name:
         args = [arg for arg in sys.argv[1:] if arg != "--cli"]

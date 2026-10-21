@@ -145,15 +145,16 @@ def recall_and_verify(direction):
     )
 
 
-# From both vertical views, the model's Front direction (+Y) is screen-up.
+# From both vertical views, the opening Front direction is screen-up.
+opening_front, opening_up = window.saved_standard_views["front"]
 send_physical("top")
 _, _, top_frame = normalized_camera_frame(camera)
-assert np.allclose(top_frame[:, 2], (0.0, 0.0, 1.0))
-assert np.allclose(top_frame[:, 1], (0.0, 1.0, 0.0))
+assert np.allclose(top_frame[:, 2], opening_up)
+assert np.allclose(top_frame[:, 1], opening_front)
 send_physical("bottom")
 _, _, bottom_frame = normalized_camera_frame(camera)
-assert np.allclose(bottom_frame[:, 2], (0.0, 0.0, -1.0))
-assert np.allclose(bottom_frame[:, 1], (0.0, 1.0, 0.0))
+assert np.allclose(bottom_frame[:, 2], -opening_up)
+assert np.allclose(bottom_frame[:, 1], opening_front)
 
 # Initial calibrations deliberately include yaw, pitch, and roll so this checks
 # complete camera frames rather than only the displayed Z correction.

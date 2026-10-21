@@ -21,6 +21,17 @@ def tetrahedra_fixture(count: int = 400) -> tuple[np.ndarray, np.ndarray]:
     return points, faces
 
 
+def test_cached_probe_statistics_preserve_exact_dimensions_and_inputs():
+    points, faces = tetrahedra_fixture()
+    before_points, before_faces = points.copy(), faces.copy()
+    statistics = daq.probe_source_statistics(points, faces)
+    for target in (100, 500, 1000):
+        assert daq.physical_probe_dimensions(points, faces, target, statistics) == (
+            daq.physical_probe_dimensions(points, faces, target))
+    assert np.array_equal(points, before_points)
+    assert np.array_equal(faces, before_faces)
+
+
 def test_algorithm_order_prioritizes_quality_modes():
     assert mm.ALGORITHMS[:4] == [
         mm.DEPTH_DENSITY_ADAPTIVE_LABEL,

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meshmill"
-version = "0.3.2"
+version = "0.3.3"
 description = "A local desktop and command-line tool for inspecting and optimizing STL meshes."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -33,7 +33,7 @@ dependencies = [
 meshmill = "meshmill:main"
 
 [tool.setuptools]
-py-modules = ["meshmill", "out_of_core", "gpu_resident", "depth_adaptive_qem", "qem_progress", "worker_lifecycle"]
+py-modules = ["meshmill", "out_of_core", "gpu_resident", "depth_adaptive_qem", "qem_progress", "worker_lifecycle", "metrics_history"]
 
 [tool.ruff]
 line-length = 100

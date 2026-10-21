@@ -93,6 +93,10 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 [Registry]
 Root: HKCU; Subkey: "{#MySettingsKey}"; Flags: uninsdeletekey
 ; Advertise an optional handler and secondary verb, leaving the default STL handler alone.
+Root: HKCU; Subkey: "{#MySettingsKey}\Capabilities"; ValueType: string; ValueName: "ApplicationName"; ValueData: "{#MyAppName}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "{#MySettingsKey}\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "Inspect and reduce STL meshes"
+Root: HKCU; Subkey: "{#MySettingsKey}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".stl"; ValueData: "{#MyAssociationProgId}"
+Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "{#MyAppName}"; ValueData: "{#MySettingsKey}\Capabilities"; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\{#MyAssociationProgId}"; ValueType: string; ValueData: "STL mesh"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\{#MyAssociationProgId}\DefaultIcon"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"",0"
 Root: HKCU; Subkey: "Software\Classes\{#MyAssociationProgId}\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
