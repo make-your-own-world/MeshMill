@@ -3,7 +3,7 @@
 </p>
 
 <!-- localization-navigation:start -->
-> **0.3.1 localization status:** The current application and documentation release is English-only.
+> **0.3.2 localization status:** The current application and documentation release is English-only.
 > Updated translations were deferred because translation, structural validation, and review exceeded
 > the resources and processing capacity available for this release. The links below lead to older
 > community translation work and may not describe current features.
@@ -57,7 +57,13 @@ generated geometry, and other STL sources. It prepares geometry for downstream e
 manufacturing tools, and other mesh workflows. General-purpose modeling, sculpting, animation,
 materials, and scene creation are outside its scope.
 
-### 0.3.1
+### 0.3.2 hotfix
+
+Optimization workers now stop when MeshMill closes, crashes, or is force-closed. Installation,
+upgrade, and uninstall also clean up workers belonging to that installation. Reduction algorithms
+and mesh quality are unchanged. See the [changelog](CHANGELOG.md).
+
+### 0.3.1 improvements
 
 This maintenance release improves loading and result display, adds Ctrl+double-click connected
 selection, and smooths keyboard and wheel navigation. Matched full-scan tests measured **9% less
@@ -72,8 +78,8 @@ development dependencies are not required.
 
 | System | Recommended download | Status |
 | --- | --- | --- |
-| **Windows x64** | **[Download the Windows installer](https://github.com/make-your-own-world/MeshMill/releases/download/v0.3.1/MeshMill-0.3.1-windows-x64-setup.exe)** | Supported release |
-| Windows x64, no installation | [Download the portable ZIP](https://github.com/make-your-own-world/MeshMill/releases/download/v0.3.1/MeshMill-0.3.1-windows-x64-portable.zip) | Supported release |
+| **Windows x64** | **[Download the Windows installer](https://github.com/make-your-own-world/MeshMill/releases/download/v0.3.2/MeshMill-0.3.2-windows-x64-setup.exe)** | Supported release |
+| Windows x64, no installation | [Download the portable ZIP](https://github.com/make-your-own-world/MeshMill/releases/download/v0.3.2/MeshMill-0.3.2-windows-x64-portable.zip) | Supported release |
 | Linux x86-64 | [Download the Linux preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-linux-x86_64.tar.gz) | Early testing preview |
 | macOS Apple silicon | [Download the Apple silicon preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-macos-arm64.zip) | Early testing preview |
 | macOS Intel | [Download the Intel Mac preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-macos-x86_64.zip) | Early testing preview |

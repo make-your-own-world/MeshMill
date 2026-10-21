@@ -13,13 +13,15 @@ import struct
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 from pathlib import Path
 
 import fast_simplification
 import numpy as np
+
+from worker_lifecycle import OwnedProcessPool, completed_futures
 
 INDEX_VERSION = 1
 STL_RECORD_BYTES = 50
@@ -206,7 +208,7 @@ def _parallel_bounds(
     low = np.full(3, np.inf, dtype=np.float64)
     high = np.full(3, -np.inf, dtype=np.float64)
     done = 0
-    for future in as_completed(futures):
+    for future in completed_futures(futures, lambda: _cancelled(cancel_event)):
         _cancelled(cancel_event)
         start, stop, chunk_low, chunk_high = future.result()
         low = np.minimum(low, chunk_low)
@@ -244,7 +246,7 @@ def _parallel_tile_counts(
     ]
     merged: dict[int, int] = {}
     done = 0
-    for future in as_completed(futures):
+    for future in completed_futures(futures, lambda: _cancelled(cancel_event)):
         _cancelled(cancel_event)
         start, stop, result = future.result()
         for code, count in result:
@@ -417,7 +419,7 @@ def build_index(
     analysis_workers = max(1, min(int(analysis_workers), block_count))
     if analysis_workers > 1 and block_count > 1:
         ranges = _analysis_ranges(triangle_count, block_triangles)
-        with ProcessPoolExecutor(max_workers=analysis_workers) as executor:
+        with OwnedProcessPool(max_workers=analysis_workers) as executor:
             low, high = _parallel_bounds(
                 executor,
                 source,
@@ -933,23 +935,22 @@ def optimize_indexed_mesh(
             checkpoint()
             _progress(progress_callback, "optimizing tiles", processed, manifest.triangle_count)
     elif pending:
-        executor = ProcessPoolExecutor(max_workers=workers)
-        futures = [
-            executor.submit(
-                _optimize_tile,
-                os.fspath(index_directory),
-                tile,
-                tile_number,
-                tile_target,
-                os.fspath(run_directory),
-                aggressiveness,
-                algorithm,
-                gpu_preference,
-            )
-            for tile_number, tile, tile_target in pending
-        ]
-        try:
-            for future in as_completed(futures):
+        with OwnedProcessPool(max_workers=workers) as executor:
+            futures = [
+                executor.submit(
+                    _optimize_tile,
+                    os.fspath(index_directory),
+                    tile,
+                    tile_number,
+                    tile_target,
+                    os.fspath(run_directory),
+                    aggressiveness,
+                    algorithm,
+                    gpu_preference,
+                )
+                for tile_number, tile, tile_target in pending
+            ]
+            for future in completed_futures(futures, lambda: _cancelled(cancel_event)):
                 _cancelled(cancel_event)
                 tile_number, source_count, output_count, result_path = future.result()
                 results_by_tile[tile_number] = (Path(result_path), output_count)
@@ -958,13 +959,6 @@ def optimize_indexed_mesh(
                 _progress(
                     progress_callback, "optimizing tiles", processed, manifest.triangle_count
                 )
-        except Exception:
-            for future in futures:
-                future.cancel()
-            executor.shutdown(wait=False, cancel_futures=True)
-            raise
-        else:
-            executor.shutdown(wait=True)
     _cancelled(cancel_event)
     results = [results_by_tile[index] for index in range(1, len(manifest.tiles) + 1)]
     output_triangle_count = sum(count for _path, count in results)

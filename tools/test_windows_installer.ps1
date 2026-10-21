@@ -111,8 +111,51 @@ function Wait-ForRemoval {
     }
 }
 
+function Start-OrphanWorkerFixture {
+    $Executable = Join-Path $InstallDirectory 'MeshMillCLI.exe'
+    Copy-Item -LiteralPath $WorkerFixture -Destination $Executable -Force
+    Invoke-CheckedProcess -FilePath $Executable -ArgumentList @('--orphan')
+    $Deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $Worker = Get-CimInstance Win32_Process -Filter "Name = 'MeshMillCLI.exe'" |
+            Where-Object { $_.ExecutablePath -eq $Executable -and $_.CommandLine -like '*--worker*' } |
+            Select-Object -First 1
+        if ($Worker) {
+            $Owned = Get-Process -Id $Worker.ProcessId
+            $null = $Owned.Handle
+            return $Owned
+        }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $Deadline)
+    throw 'The isolated orphan-worker fixture did not start.'
+}
+
+function Assert-WorkerCleanup {
+    param([System.Diagnostics.Process]$Worker)
+    if (-not $Worker.WaitForExit(10000)) {
+        throw 'An installation-owned orphan worker survived cleanup.'
+    }
+    if ($UnrelatedWorker.HasExited) {
+        throw 'Cleanup terminated a same-named process outside the installation.'
+    }
+}
+
 New-Item -ItemType Directory -Path $TestRoot | Out-Null
+$UnrelatedWorker = $null
+$OrphanWorker = $null
 try {
+    $WorkerFixture = Join-Path $TestRoot 'worker-fixture.exe'
+    $Compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    Invoke-CheckedProcess -FilePath $Compiler -ArgumentList @(
+        '/nologo', '/target:exe', "/out:`"$WorkerFixture`"",
+        "`"$(Join-Path $PSScriptRoot '..\tests\installer_worker_fixture.cs')`""
+    )
+    $UnrelatedDirectory = Join-Path $TestRoot 'unrelated'
+    New-Item -ItemType Directory -Path $UnrelatedDirectory | Out-Null
+    $UnrelatedExecutable = Join-Path $UnrelatedDirectory 'MeshMillCLI.exe'
+    Copy-Item -LiteralPath $WorkerFixture -Destination $UnrelatedExecutable
+    $UnrelatedWorker = Start-Process -FilePath $UnrelatedExecutable -PassThru -WindowStyle Hidden
+    $null = $UnrelatedWorker.Handle
     if (Test-Path -LiteralPath $StartMenuShortcut) {
         Copy-Item -LiteralPath $StartMenuShortcut -Destination $StartMenuShortcutBackup
     }
@@ -176,7 +219,9 @@ try {
         $UpgradeArguments += "/REOPENFILE=`"$ReopenFile`""
     }
     Write-Host "Upgrading in place..."
+    $OrphanWorker = Start-OrphanWorkerFixture
     Invoke-CheckedProcess -FilePath $Installer -ArgumentList $UpgradeArguments
+    Assert-WorkerCleanup -Worker $OrphanWorker
     if (Test-Path -LiteralPath $ObsoleteFile) {
         throw "The upgrade left an obsolete PyInstaller payload file behind."
     }
@@ -196,6 +241,7 @@ try {
     }
 
     Write-Host "Uninstalling release candidate..."
+    $OrphanWorker = Start-OrphanWorkerFixture
     foreach ($AssociationKey in $AssociationKeys) {
         if (-not (Test-Path -LiteralPath $AssociationKey)) {
             throw "The installer did not register its Open with entry."
@@ -207,6 +253,7 @@ try {
         "/NORESTART"
     )
     Wait-ForRemoval -Path (Join-Path $InstallDirectory "MeshMill.exe")
+    Assert-WorkerCleanup -Worker $OrphanWorker
     if (Test-Path -LiteralPath (Join-Path $InstallDirectory "MeshMill.exe")) {
         throw "The uninstaller left the application executable behind."
     }
@@ -233,6 +280,12 @@ try {
     Write-Host "Installer install, upgrade, launch, and uninstall checks passed."
 }
 finally {
+    foreach ($Fixture in @($OrphanWorker, $UnrelatedWorker)) {
+        if ($Fixture -and -not $Fixture.HasExited) {
+            $Fixture.Kill()
+            $Fixture.WaitForExit()
+        }
+    }
     $Uninstaller = Join-Path $InstallDirectory "unins000.exe"
     if (Test-Path -LiteralPath (Join-Path $InstallDirectory "MeshMill.exe")) {
         $Cleanup = Start-Process -FilePath $Uninstaller -ArgumentList @(

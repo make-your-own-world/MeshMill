@@ -17,6 +17,8 @@ def test_changelog_scrolling_and_document_contrast(theme, current_only):
         end = text.find("\n## ", start + 1)
         text = text[start:] if end < 0 else text[start:end]
     text += "\n\n[Reference](https://example.com/reference) and **bold** with `inline code`.\n"
+    # Exercise scrolling even when a hotfix has short release notes.
+    text += "\n\nScrolling test paragraph.\n" * 30
     viewer = mm.create_changelog_viewer(text, theme)
     viewer.resize(650, 300)
     viewer.show()

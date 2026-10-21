@@ -1,17 +1,18 @@
 """Exercise real Qt/VTK state transitions with isolated preferences."""
-import time
 import threading
+import time
 
 import numpy as np
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QSettings, QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QKeySequence
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox, QLineEdit, QFrame, QLabel, QComboBox
+from PySide6.QtWidgets import QApplication, QComboBox, QFrame, QLabel, QLineEdit, QMessageBox
+from test_operation_progress import sphere
 from vtkmodules.vtkIOGeometry import vtkSTLWriter
+from worker_lifecycle_cases import slow_task
 
 import meshmill as mm
-from test_operation_progress import sphere
 
 
 def wait(app, predicate, timeout=20):
@@ -578,3 +579,40 @@ def test_multiple_selection_drags_crop_and_undo_preserve_exact_coordinates(gui):
     window._undo_working_mesh()
     wait(app, lambda: settled(window))
     assert all(np.array_equal(a,b) for a,b in zip(original,(window.source_points,window.source_faces)))
+
+
+def test_close_joins_active_optimization_worker(gui, tmp_path):
+    app, window, _ = gui
+    window.optimization_executor.submit(slow_task, str(tmp_path), "worker")
+    wait(app, lambda: (tmp_path / "worker").exists())
+    processes = list(window.optimization_executor._processes.values())
+    window.close()
+    assert all(not process.is_alive() for process in processes)
+
+
+def test_cancel_joins_worker_and_replacement_accepts_work(gui, tmp_path):
+    app, window, _ = gui
+    window._begin_mesh_operation("Optimizing", "Test mesh")
+    window.operation_future = window.optimization_executor.submit(
+        slow_task, str(tmp_path), "worker"
+    )
+    window.operation_uses_process = True
+    wait(app, lambda: (tmp_path / "worker").exists())
+    processes = list(window.optimization_executor._processes.values())
+    window._cancel_mesh_operation()
+    assert all(not process.is_alive() for process in processes)
+    future = window.optimization_executor.submit(abs, -4)
+    wait(app, future.done)
+    assert future.result() == 4
+    assert not window.busy
+
+
+def test_application_quit_stops_worker_without_window_close(gui, tmp_path):
+    app, window, _ = gui
+    window.optimization_executor.submit(slow_task, str(tmp_path), "worker")
+    wait(app, lambda: (tmp_path / "worker").exists())
+    processes = list(window.optimization_executor._processes.values())
+    app.aboutToQuit.connect(window._shutdown_background_workers)
+    app.aboutToQuit.emit()
+    assert all(not process.is_alive() for process in processes)
+    assert window._background_workers_stopped

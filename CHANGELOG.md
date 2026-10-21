@@ -2,6 +2,20 @@
 
 Published releases are listed newest first. Preview builds are marked separately.
 
+## 0.3.2 - 2026-10-21
+
+### Worker cleanup
+
+- Stop and join optimization workers when cancelling, closing the window, or quitting the app.
+- Stop workers if their owning MeshMill process crashes or is force-closed. Windows process
+  containment also covers nested workers and workers busy in native geometry or GPU code.
+- Cancel tiled analysis and reduction without waiting for a busy worker to finish its current task.
+- Clean up processes belonging to the selected installation before installing, upgrading, or
+  uninstalling. Same-named processes from other installations and unrelated Python processes
+  are left alone.
+
+This hotfix does not change reduction algorithms, mesh quality, or navigation controls.
+
 ## 0.3.1
 
 ### Performance and progress

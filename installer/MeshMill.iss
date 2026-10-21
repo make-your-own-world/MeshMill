@@ -112,6 +112,115 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "{code:GetReopenParameters}"; Fla
 Type: filesandordirs; Name: "{localappdata}\{#MyAppName}"
 
 [Code]
+function OpenOwnedProcess(Access: LongWord; Inherit: Boolean; PID: LongWord): THandle;
+  external 'OpenProcess@kernel32.dll stdcall';
+function QueryOwnedProcessImage(Process: THandle; Flags: LongWord;
+  FileName: String; var Size: LongWord): Boolean;
+  external 'QueryFullProcessImageNameW@kernel32.dll stdcall';
+function StopOwnedProcess(Process: THandle; ExitCode: LongWord): Boolean;
+  external 'TerminateProcess@kernel32.dll stdcall';
+function WaitOwnedProcess(Process: THandle; Milliseconds: LongWord): LongWord;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function CloseOwnedHandle(Handle: THandle): Boolean;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+function IsInstalledExecutable(const FileName: String): Boolean;
+begin
+  Result := (CompareText(FileName, ExpandConstant('{app}\MeshMill.exe')) = 0) or
+    (CompareText(FileName, ExpandConstant('{app}\MeshMillCLI.exe')) = 0);
+end;
+
+function StopInstalledProcesses(): String;
+var
+  Locator, Service, Processes, Process: Variant;
+  I, Pass: Integer;
+  Handle: THandle;
+  Image: String;
+  Size: LongWord;
+  Found, Confirmed: Boolean;
+begin
+  Result := '';
+  Confirmed := False;
+  try
+    Locator := CreateOleObject('WbemScripting.SWbemLocator');
+    Service := Locator.ConnectServer('.', 'root\CIMV2');
+    { Repeat the snapshot to catch workers created while their owner was closing. }
+    for Pass := 1 to 4 do begin
+      Found := False;
+      Processes := Service.ExecQuery(
+        'SELECT ProcessId, ExecutablePath FROM Win32_Process WHERE ' +
+        'Name = ''MeshMill.exe'' OR Name = ''MeshMillCLI.exe''');
+      for I := 0 to Processes.Count - 1 do begin
+        Process := Processes.ItemIndex(I);
+        if not VarIsNull(Process.ExecutablePath) then
+          if IsInstalledExecutable(Process.ExecutablePath) then begin
+            Handle := OpenOwnedProcess($00101001, False, Process.ProcessId);
+            if Handle <> 0 then begin
+              try
+                { Recheck the executable through the process handle, not a reusable PID. }
+                Size := 32768;
+                SetLength(Image, Size);
+                if QueryOwnedProcessImage(Handle, 0, Image, Size) then begin
+                  SetLength(Image, Size);
+                  if IsInstalledExecutable(Image) then begin
+                    Found := True;
+                    if not Confirmed then begin
+                      if SuppressibleMsgBox(
+                        'MeshMill is running. Save any work before continuing. ' +
+                        'Continuing will close MeshMill and its processing workers ' +
+                        'from this installation.', mbConfirmation, MB_OKCANCEL, IDOK) <> IDOK then begin
+                        Result := 'Close MeshMill after saving your work, then try again.';
+                        Exit;
+                      end;
+                      Confirmed := True;
+                    end;
+                    if WaitOwnedProcess(Handle, 0) <> 0 then begin
+                      StopOwnedProcess(Handle, 1);
+                      if WaitOwnedProcess(Handle, 5000) <> 0 then begin
+                        Result := 'MeshMill could not be closed. Close it and try again.';
+                        Exit;
+                      end;
+                    end;
+                  end;
+                end else if WaitOwnedProcess(Handle, 0) <> 0 then begin
+                  Result := 'MeshMill process cleanup could not be verified. Close MeshMill and try again.';
+                  Exit;
+                end;
+              finally
+                CloseOwnedHandle(Handle);
+              end;
+            end else begin
+              { A process may have exited between the snapshot and OpenProcess. }
+              if DLLGetLastError = 5 then begin
+                Result := 'Access to a running MeshMill process was denied. Close it and try again.';
+                Exit;
+              end;
+            end;
+          end;
+      end;
+      if not Found then Exit;
+    end;
+    Result := 'MeshMill is still running. Close it and try again.';
+  except
+    Result := 'MeshMill process cleanup could not be verified. Close MeshMill and try again.';
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := StopInstalledProcesses();
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Error: String;
+begin
+  if CurUninstallStep = usUninstall then begin
+    Error := StopInstalledProcesses();
+    if Error <> '' then RaiseException(Error);
+  end;
+end;
+
 function GetReopenParameters(Param: String): String;
 var
   ReopenFile: String;

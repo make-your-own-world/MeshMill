@@ -20,7 +20,7 @@ import time
 import traceback
 import warnings
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -29,7 +29,6 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import fast_simplification
-from qem_progress import simplify as simplify_with_progress
 import numpy as np
 import vtkmodules.vtkInteractionStyle
 import vtkmodules.vtkRenderingOpenGL2  # noqa: F401
@@ -142,6 +141,8 @@ from out_of_core import (
     load_manifest,
     optimize_indexed_mesh,
 )
+from qem_progress import simplify as simplify_with_progress
+from worker_lifecycle import OwnedProcessPool
 
 # Conservative allowance for source arrays, VTK objects, render data, and temporary work buffers.
 ESTIMATED_BYTES_PER_TRIANGLE = 220
@@ -3588,9 +3589,7 @@ class MainWindow(QMainWindow):
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mesh-reducer")
         self.source_measurement_cache = None
         self.update_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="update-check")
-        self.optimization_executor = ProcessPoolExecutor(
-            max_workers=1, mp_context=multiprocessing.get_context("spawn")
-        )
+        self.optimization_executor = OwnedProcessPool(max_workers=1)
         self.bridge = ResultBridge()
         self.bridge.done.connect(self._finish_simplify)
         self.load_bridge = LoadBridge()
@@ -6720,14 +6719,8 @@ class MainWindow(QMainWindow):
             self.operation_future.cancel()
 
         if self.operation_uses_process:
-            processes = list(getattr(self.optimization_executor, "_processes", {}).values())
-            for process in processes:
-                if process.is_alive():
-                    process.terminate()
-            self.optimization_executor.shutdown(wait=False, cancel_futures=True)
-            self.optimization_executor = ProcessPoolExecutor(
-                max_workers=1, mp_context=multiprocessing.get_context("spawn")
-            )
+            self.optimization_executor.terminate_and_join()
+            self.optimization_executor = OwnedProcessPool(max_workers=1)
 
         self.generation += 1
         self.edit_generation += 1
@@ -7378,13 +7371,23 @@ class MainWindow(QMainWindow):
                 tuple(camera.GetViewUp()), camera.GetParallelScale(),
                 camera.GetParallelProjection(), camera.GetViewAngle())
 
-    def closeEvent(self, event) -> None:
+    def _shutdown_background_workers(self) -> None:
+        if getattr(self, "_background_workers_stopped", False):
+            return
         self._closing = True
+        if self.operation_cancel_event is not None:
+            self.operation_cancel_event.set()
+        if self.operation_future is not None:
+            self.operation_future.cancel()
         self.navigation_timer.stop()
         self.navigation_style._wheel_timer.stop()
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.update_executor.shutdown(wait=False, cancel_futures=True)
-        self.optimization_executor.shutdown(wait=False, cancel_futures=True)
+        self.optimization_executor.terminate_and_join()
+        self._background_workers_stopped = True
+
+    def closeEvent(self, event) -> None:
+        self._shutdown_background_workers()
         self.gpu_counters.close()
         self.vtk_widget.Finalize()
         super().closeEvent(event)
@@ -10755,6 +10758,7 @@ def main() -> int:
     if app_icon.exists():
         app.setWindowIcon(QIcon(os.fspath(app_icon)))
     window = MainWindow()
+    app.aboutToQuit.connect(window._shutdown_background_workers)
     window.diagnostic_log_path = verify_args.diagnostic_log
     if window.diagnostic_log_path is not None:
         window.diagnostic_log_path.unlink(missing_ok=True)
