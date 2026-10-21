@@ -6,6 +6,8 @@ measurable, and reversible before a result is applied.
 Read the [algorithm reference](ALGORITHMS.md) for production formulas, implementation provenance,
 and the distinction between reduction and density display analysis. The reproducible full-scan
 results are in the [algorithm comparison](../benchmarks/ALGORITHM_COMPARISON.md).
+The [0.3.1 workflow comparison](../benchmarks/V0_3_1_PERFORMANCE.md) separates installed-application
+timings, display-only GPU acceleration, command-line timings, and geometry-equivalence checks.
 The [depth-gauge reduction design](DEPTH_GAUGE_REDUCTION.md) records the origin, complete mathematics,
 GPU execution profile, rejected approaches, and production Depth Adaptive QEM benchmark.
 

@@ -3,7 +3,7 @@
 </p>
 
 <!-- localization-navigation:start -->
-> **0.3.0 localization status:** The current application and documentation release is English-only.
+> **0.3.1 localization status:** The current application and documentation release is English-only.
 > Updated translations were deferred because translation, structural validation, and review exceeded
 > the resources and processing capacity available for this release. The links below lead to older
 > community translation work and may not describe current features.
@@ -45,17 +45,25 @@ and controlled mesh reduction without requiring an account or uploading geometry
 
 GPU-accelerated OpenGL rendering keeps viewport navigation, hardware picking, density visualization,
 and interactive inspection responsive. That graphics support is included in the normal MeshMill
-package. **Depth Adaptive QEM (GPU / Higher Quality)** asks the GPU to perform a different kind of
-work: CUDA surface measurement before boundary-preserving Fast QEM. The Windows packages include the
-minimal NVIDIA CUDA computation runtime inside MeshMill, without installing a system-wide toolkit or
-background service. The first Depth Adaptive QEM run prepares and caches GPU kernels for that machine;
-later meshes reuse the cache. Geometry work runs outside the interface so long operations do not block
-navigation or controls.
+package. **Depth + Density Adaptive QEM (GPU / Best)** asks the GPU to perform a different kind of
+work: CUDA surface and density measurement before boundary-preserving QEM assembly. The Windows
+packages include the minimal NVIDIA CUDA computation runtime inside MeshMill, without installing a
+system-wide toolkit or background service. The first compatible run prepares and caches GPU kernels for
+that machine; later meshes reuse the cache. Geometry work runs outside the interface so long operations
+do not block navigation or controls.
 
 MeshMill works with meshes from 3D scanners, CAD and modeling exports, reconstruction pipelines,
 generated geometry, and other STL sources. It prepares geometry for downstream editors,
 manufacturing tools, and other mesh workflows. General-purpose modeling, sculpting, animation,
 materials, and scene creation are outside its scope.
+
+### 0.3.1
+
+This maintenance release improves loading and result display, adds Ctrl+double-click connected
+selection, and smooths keyboard and wheel navigation. Matched full-scan tests measured **9% less
+launch-to-result time in Wireframe** and **13% less in Density**; warmed GPU density visualization
+was approximately **3.3× faster**. Reduction decisions are unchanged. See the
+[comparison conditions](benchmarks/V0_3_1_PERFORMANCE.md) and [full changelog](CHANGELOG.md).
 
 ## Download
 
@@ -64,13 +72,13 @@ development dependencies are not required.
 
 | System | Recommended download | Status |
 | --- | --- | --- |
-| **Windows x64** | **[Download the Windows installer](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0/MeshMill-0.2.0-windows-x64-setup.exe)** | Supported release |
-| Windows x64, no installation | [Download the portable ZIP](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0/MeshMill-0.2.0-windows-x64-portable.zip) | Supported release |
+| **Windows x64** | **[Download the Windows installer](https://github.com/make-your-own-world/MeshMill/releases/download/v0.3.1/MeshMill-0.3.1-windows-x64-setup.exe)** | Supported release |
+| Windows x64, no installation | [Download the portable ZIP](https://github.com/make-your-own-world/MeshMill/releases/download/v0.3.1/MeshMill-0.3.1-windows-x64-portable.zip) | Supported release |
 | Linux x86-64 | [Download the Linux preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-linux-x86_64.tar.gz) | Early testing preview |
 | macOS Apple silicon | [Download the Apple silicon preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-macos-arm64.zip) | Early testing preview |
 | macOS Intel | [Download the Intel Mac preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-macos-x86_64.zip) | Early testing preview |
 
-### Sample mesh
+### Explore the sample mesh
 
 The sample is an intentionally dense composite mesh with redundant layers and uneven point density.
 Use it to explore display modes, crop and regional tools, and compare reduction algorithms without
@@ -98,7 +106,7 @@ Research, formulas, benchmarks, and publication figures are available in the
 **Most Windows users should choose the Windows installer.** Use the portable ZIP only when you do
 not want MeshMill installed or do not have permission to install applications. The normal package
 includes GPU-accelerated viewing, every built-in CPU reduction algorithm, and the minimal CUDA
-runtime used by Depth Adaptive QEM. That algorithm activates when MeshMill detects a compatible
+runtime used by the depth-guided algorithms. The GPU-guided algorithms activate when MeshMill detects a compatible
 NVIDIA GPU and driver. It requires no separate download or system-wide CUDA installation.
 CUDA Runtime, NVRTC, and CuPy remain separately licensed components. See the
 [third-party notices](THIRD_PARTY_NOTICES.md) and the
@@ -125,12 +133,13 @@ MeshMill never starts optimization merely because a file or setting changed.
 ## Capabilities
 
 - Binary and ASCII STL input, binary STL output
-- Fast QEM plus optional Depth Adaptive QEM (GPU / Higher Quality), density-balanced,
+- Depth + Density Adaptive QEM (GPU / Best), Depth Adaptive QEM (GPU / Higher Quality), Fast QEM,
+  density-balanced,
   shape-preserving, and topology-preserving reduction
 - A color-coded quality row comparing reduction, sampled error, dimensional drift, area change,
   and non-manifold topology after optimization
-- GPU-adaptive physical probes that remove supported scan-scale variation before QEM reduction
-- Per-application CUDA GPU selection for Depth Adaptive QEM on multi-GPU systems
+- GPU-adaptive physical probes and density weighting that remove supported scan-scale variation before QEM reduction
+- Per-application CUDA GPU selection for GPU-guided reduction on multi-GPU systems
 - GPU-accelerated OpenGL viewport, hardware picking, and density visualization
 - Native background geometry workers for mesh reduction
 - Shaded, density, wireframe, and vertex display modes
@@ -147,9 +156,9 @@ MeshMill never starts optimization merely because a file or setting changed.
 - Local processing with no account, telemetry, upload, or cloud dependency
 
 The Performance settings list CUDA adapters by model, PCI address, and memory capacity. Selecting an
-adapter directs Depth Adaptive QEM analysis to that device for whole-mesh and selection-only work.
-System default uses CUDA device 0. The OpenGL viewport continues to use the graphics adapter chosen
-by the operating system.
+adapter directs GPU-guided analysis to that device for whole-mesh and selection-only work. System
+selection favors the compatible device with the most available VRAM. The OpenGL viewport continues to
+use the graphics adapter chosen by the operating system.
 
 ## Inspect geometry before reducing it
 
@@ -159,10 +168,10 @@ shape preservation before applying an optimization pass.
 ![MeshMill shaded viewport showing the bundled sample mesh](docs/images/meshmill-shaded.png)
 
 The Vertices display exposes the actual point distribution. Dense scan regions, sparse areas, and
-abrupt changes in sampling are visible without changing the geometry. The expanded metrics panel
-tracks CPU, memory, GPU, and geometry-processing activity while working with the mesh.
+abrupt changes in sampling are visible without changing the geometry. The metrics panel can track
+CPU, memory, GPU, and geometry-processing activity while working with the mesh.
 
-![MeshMill Vertices display with expanded performance metrics](docs/images/meshmill-vertices.png)
+![MeshMill Vertices display with the current optimization toolbox](docs/images/meshmill-vertices.png)
 
 The Wireframe display shows triangle structure directly. It helps identify unnecessary density,
 irregular triangulation, and regions where simplification can remove substantial geometry.
@@ -204,6 +213,7 @@ stays centered on the pointer and reveals local density without changing the mai
 | Right mouse hold | Magnifier |
 | Shift + left-click | Add or remove ruler points |
 | Ctrl + left-drag | Draw a selection polygon |
+| Ctrl + double-click | Add or remove the clicked connected component |
 | `Ctrl+C` | Add the polygon to the saved selection |
 | `Ctrl+X` | Crop to the selection |
 | `Ctrl+Space` | Optimize the selection |
@@ -211,6 +221,7 @@ stays centered on the pointer and reveals local density without changing the mai
 | `Escape` | Clear the active selection or ruler |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
 | `Ctrl+S` | Save the current mesh state |
+| `F11` | Enter or leave fullscreen |
 
 Standard view keys follow the six-key navigation block:
 
@@ -227,31 +238,51 @@ Saving a view also updates its opposite view. Left and Right, Front and Back, an
 remain paired. In the confirmation dialog, **Save** is the default action, so Enter saves the
 orientation. Front appears at the top of both Top and Bottom views.
 
-Shortcuts can be changed or reset in Settings.
+Shortcuts can be changed or reset in Settings. Keyboard and wheel navigation use short, bounded
+transitions without accumulating momentum. Repeated arrow rotation retains its pivot and zoom level.
+Preferences search filters setting names and section headings.
 
 ## Selection workflow
 
 Hold Ctrl and left-drag to draw a polygon. Drag corners to reshape it, left-click an edge to add a
-point, or right-click an edge to remove one. Add more regions with `Ctrl+C`. Moving the camera hides
-the screen-space polygon while retaining the selected geometry.
+point, or right-click an edge to remove one. Ctrl-drag another region to retain the previous
+selection and add to it. Enter or `Ctrl+C` can also retain a region explicitly.
+Shrinking the current outline removes geometry outside it without
+removing separately added regions. Empty outlines remain editable.
+
+Ctrl+double-click a mesh to add its connected component to the selection, or remove that component
+if it is already fully selected. Other selected components are preserved.
+Triangles connected through shared vertices are included; disconnected geometry across a gap
+is excluded. This selects by mesh connectivity, rather than by proximity or visible outline.
+
+![Ctrl+double-click connected selection, with separate mesh geometry left unselected](docs/images/meshmill-connected-selection.png)
+
+Modifier keys do not dismiss the outline. Shift-click adds or removes ruler points while a selection
+is active. Camera rotation clears the ruler. Camera movement preserves the selected geometry but
+clears the view-specific outline.
+Draw a new outline to add a selection from the new view. Clicking inside
+the outline does not add or apply it.
 
 Optimization with an active selection affects that selection only. The result remains provisional
-until **Apply** is selected. **Cancel** discards the provisional result and retains the selection so
-another configuration can be tried. Crop and delete operations become normal undoable mesh edits.
+until **Apply** is selected. **Cancel** discards the provisional result and clears the selection.
+Crop and delete operations become normal undoable mesh edits.
 
 The selection panel reports the cumulative selected vertices, triangles, mesh share, estimated
-size, and dimensions. Its actions crop, add, optimize, delete, step back, or clear the retained
-selection without hiding the surrounding geometry.
+size, and dimensions. Its actions crop, delete, step back, or clear the retained
+selection without hiding the surrounding geometry. Use **Optimize selection** in the toolbox
+to reduce the highlighted geometry.
 
 ![MeshMill showing a retained regional selection and its geometry statistics](docs/images/meshmill-crop-selection.png)
 
 ## Large meshes
 
 Before allocating a binary STL, MeshMill compares its estimated working memory with the configured
-memory budget. A file above the budget opens as a bounded, read-only overview. The overview reports
-the full source triangle count but disables editing and export because it is a sample, not the full
-object. Indexed, zoom-dependent out-of-core processing is planned in
-[docs/OUT_OF_CORE.md](docs/OUT_OF_CORE.md).
+memory budget. Oversized files can open as a bounded overview or use **Tiled processing**. Tiled
+processing builds a reusable disk-backed spatial index, optimizes independent regions within the
+configured memory and process limits, validates their protected boundaries, and streams the final
+STL without loading one global geometry array. Completed tiles are checkpointed for interruption
+recovery. The design, formulas, benchmark, and current limitations are documented in
+[docs/TILED_PROCESSING.md](docs/TILED_PROCESSING.md).
 
 ## Updates
 
@@ -267,15 +298,52 @@ in [docs/UPDATES.md](docs/UPDATES.md).
 
 ```powershell
 .\MeshMillCLI.exe "C:\path\mesh.stl" --preset balanced
+.\MeshMillCLI.exe "C:\path\mesh.stl" --quality fine
 .\MeshMillCLI.exe "C:\path\mesh.stl" --target 150000 --output "C:\path\mesh-reduced.stl"
 .\MeshMillCLI.exe "C:\path\mesh.stl" --algorithm depth-adaptive --target 150000
+.\MeshMillCLI.exe "C:\path\mesh.stl" --algorithm depth-density-adaptive --target 150000 --gpu 00000000:01:00.0
 .\MeshMillCLI.exe "C:\path\mesh.stl" --algorithm density --target 150000
-.\MeshMillCLI.exe "C:\path\mesh.stl" --algorithm topology --overwrite
+.\MeshMillCLI.exe "C:\path\mesh.stl" --algorithm shape --target 150000
+.\MeshMillCLI.exe "C:\path\mesh.stl" --algorithm topology --target 150000 --output "C:\path\mesh-reduced.stl" --overwrite
 ```
 
-Run `.\MeshMillCLI.exe --help` for all options. MeshMill refuses to overwrite its input file.
+By default, the CLI uses the same Balanced Smart quality calculation as a new MeshMill window and
+selects the highest-quality compatible algorithm. `--quality` derives a target from the loaded mesh;
+`--target` sets an exact count. `--preset` remains available for scripts that require the earlier
+fixed 50k, 200k, or 400k targets. Available algorithms are `auto`, `fast`, `density`, `shape`,
+`topology`, `depth-adaptive`, and `depth-density-adaptive`. The two depth-guided algorithms require
+a compatible NVIDIA CUDA runtime. They accept `--gpu` with a CUDA PCI bus ID, or use the
+system-selected CUDA GPU by default. `--aggressiveness` accepts values from `0` (quality) through
+`10` (speed), with `7` as the default. Run `.\MeshMillCLI.exe --help` for all options. MeshMill
+refuses to overwrite its input file.
 
-## Algorithm documentation
+After applying one or more full-mesh optimization passes in the desktop app, **Generate PowerShell
+script** appears above **Save current mesh**. It writes a non-interactive script that chains the
+committed passes through `MeshMillCLI.exe`, preserving their algorithm, target, GPU, and
+aggressiveness settings. Crop and selection edits are identified in the script but are not replayed.
+
+## Sample geometry
+
+Two versions of the development sample are available. The sample is a composite mesh with
+intentional layers of redundant geometry and varied density. It gives people without a scanner a
+realistic fixture for comparing algorithms, inspecting density, exercising regional operations,
+and developing roadmap features. MeshMill does not require scanned input.
+
+| File | Triangles | Size | Delivery | Best for |
+| --- | ---: | ---: | --- | --- |
+| [`sample-scan.stl`](samples/sample-scan.stl) | 249,999 | 11.9 MiB | Normal Git | Quick evaluation, CI, and learning the controls |
+| [`original-scan.stl`](samples/original-scan.stl) | 4,126,315 | 196.8 MiB | Git LFS | Testing dense source geometry and large-mesh performance |
+
+The smaller sample is downloaded with every normal clone. The untouched original is optional and
+managed through Git LFS so it does not inflate ordinary repository history. GitHub Desktop includes
+Git LFS. Command-line users can install Git LFS and run:
+
+```powershell
+git lfs pull --include="samples/original-scan.stl"
+```
+
+Tagged releases also publish the original STL as a direct download for people who do not use Git.
+See [`samples/README.md`](samples/README.md) for provenance, dimensions, and checksums.
 
 Algorithm contributors should also read the
 [algorithm testing guide](docs/ALGORITHM_TESTING.md) before comparing or changing reduction

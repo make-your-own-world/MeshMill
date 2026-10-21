@@ -51,7 +51,7 @@ class DummyWindow:
     def _clear_selection_and_ruler(self):
         self.calls.append("clear")
 
-    def _keyboard_navigate(self, direction, control, shift):
+    def _queue_keyboard_navigation(self, direction, control, shift):
         mode = (
             "zoom"
             if control and shift and direction in ("up", "down")

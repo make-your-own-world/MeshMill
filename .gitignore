@@ -1,6 +1,9 @@
 .venv/
+.validation-work/
 __pycache__/
 *.py[cod]
+*.pyd
+*.so
 .pytest_cache/
 .ruff_cache/
 build/

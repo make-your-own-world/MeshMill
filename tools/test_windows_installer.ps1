@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$InstallerPath,
+    [string]$BaselineInstallerPath = "",
     [string]$ProductName = "MeshMill",
     [string]$SettingsSubkey = "Software\MeshMill",
     [string]$ReopenFile = ""
@@ -18,6 +19,14 @@ $SettingsKey = "HKCU:\$SettingsSubkey"
 $SettingsRegistryPath = "HKCU\$SettingsSubkey"
 $SettingsBackup = Join-Path $TestRoot "existing-settings.reg"
 $HadExistingSettings = $false
+$AssociationKeys = @(
+    "HKCU:\Software\Classes\$ProductName.STL",
+    "HKCU:\Software\Classes\Applications\$ProductName.exe",
+    "HKCU:\Software\Classes\SystemFileAssociations\.stl\shell\$ProductName"
+)
+$StlKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Classes\.stl')
+$DefaultStlHandler = if ($StlKey) { $StlKey.GetValue('') } else { $null }
+if ($StlKey) { $StlKey.Dispose() }
 $StartMenuShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$ProductName.lnk"
 $DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "$ProductName.lnk"
 $StartMenuShortcutBackup = Join-Path $TestRoot "existing-start-menu-shortcut.lnk"
@@ -127,7 +136,10 @@ try {
         "/LOG=$InstallLog"
     )
     Write-Host "Installing release candidate..."
-    Invoke-CheckedProcess -FilePath $Installer -ArgumentList $InstallArguments
+    $InitialInstaller = if ($BaselineInstallerPath) {
+        (Resolve-Path -LiteralPath $BaselineInstallerPath).Path
+    } else { $Installer }
+    Invoke-CheckedProcess -FilePath $InitialInstaller -ArgumentList $InstallArguments
 
     foreach ($Required in @("MeshMill.exe", "MeshMillCLI.exe", "unins000.exe")) {
         if (-not (Test-Path -LiteralPath (Join-Path $InstallDirectory $Required))) {
@@ -184,6 +196,11 @@ try {
     }
 
     Write-Host "Uninstalling release candidate..."
+    foreach ($AssociationKey in $AssociationKeys) {
+        if (-not (Test-Path -LiteralPath $AssociationKey)) {
+            throw "The installer did not register its Open with entry."
+        }
+    }
     Invoke-CheckedProcess -FilePath (Join-Path $InstallDirectory "unins000.exe") -ArgumentList @(
         "/VERYSILENT",
         "/SUPPRESSMSGBOXES",
@@ -201,6 +218,17 @@ try {
     }
     if (Test-Path -LiteralPath $SettingsKey) {
         throw "The uninstaller left MeshMill user settings behind."
+    }
+    foreach ($AssociationKey in $AssociationKeys) {
+        if (Test-Path -LiteralPath $AssociationKey) {
+            throw "The uninstaller left an application-owned association entry behind."
+        }
+    }
+    $StlKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Classes\.stl')
+    $CurrentStlHandler = if ($StlKey) { $StlKey.GetValue('') } else { $null }
+    if ($StlKey) { $StlKey.Dispose() }
+    if ($DefaultStlHandler -ne $CurrentStlHandler) {
+        throw "Installation changed the default STL handler."
     }
     Write-Host "Installer install, upgrade, launch, and uninstall checks passed."
 }

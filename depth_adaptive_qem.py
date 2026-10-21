@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import fast_simplification
+from qem_progress import simplify as simplify_with_progress
 import numpy as np
 from vtkmodules.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray, vtk_to_numpy
 from vtkmodules.vtkCommonCore import vtkPoints
@@ -273,6 +274,92 @@ def _bincount(keys: Any, weights: Any, count: int) -> Any:
     return cp.bincount(keys, weights=weights, minlength=count).astype(cp.float32)
 
 
+def readonly_gpu_edge_counts(faces: np.ndarray, gpu_preference: str = "system"):
+    """Count integer edge incidence for reporting only, with a CPU-fallback sentinel.
+
+    Packed keys preserve the CPU lexicographic edge order exactly. No vertex
+    coordinates, collapse decisions, or topology repairs use this result.
+    """
+    if cp is None or len(faces) < 262_144 or faces.dtype != np.int32:
+        return None
+    if faces.size and int(faces.min()) < 0:
+        return None
+    try:
+        device_id = select_cuda_device(gpu_preference)
+        with cp.cuda.Device(device_id):
+            free_bytes, _ = cp.cuda.runtime.memGetInfo()
+            if free_bytes < len(faces) * 192:
+                return None
+            device_faces = cp.asarray(faces)
+            keys = []
+            for a, b in ((0, 1), (1, 2), (2, 0)):
+                low = cp.minimum(device_faces[:, a], device_faces[:, b]).astype(cp.uint64)
+                high = cp.maximum(device_faces[:, a], device_faces[:, b]).astype(cp.uint64)
+                keys.append((low << cp.uint64(32)) | high)
+            _, counts = cp.unique(cp.concatenate(keys), return_counts=True)
+            return cp.asnumpy(counts)
+    except Exception:  # Read-only acceleration is optional, including on driver/OOM errors.
+        return None
+
+
+def readonly_gpu_density_field(points, faces, gpu_preference="system", progress=None,
+                               cancel_event=None):
+    """Compute display-only density, leaving editable coordinates and QEM untouched.
+
+    Float64 weighted accumulation follows the CPU chunk boundaries. GPU arithmetic
+    can change final display channels by one level; this field is not a reduction input.
+    """
+    if cp is None or len(faces) < 262_144:
+        return None
+    try:
+        with cp.cuda.Device(select_cuda_device(gpu_preference)):
+            free_bytes, _ = cp.cuda.runtime.memGetInfo()
+            if free_bytes < points.nbytes * 8 + faces.nbytes * 4 + len(points) * 96:
+                return None
+            p, f = cp.asarray(points), cp.asarray(faces)
+            n = len(points)
+            count = cp.bincount(f.ravel(), minlength=n).astype(cp.float32)
+            area_sum = cp.zeros(n, cp.float32)
+            neighbors = cp.zeros(n, cp.float32)
+
+            def checkpoint(stage, done):
+                cp.cuda.get_current_stream().synchronize()
+                if cancel_event is not None and cancel_event.is_set():
+                    return False
+                if progress is not None:
+                    progress(stage, done, len(faces))
+                return True
+
+            for start in range(0, len(faces), 250_000):
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
+                chunk = f[start:start + 250_000]
+                a, b, c = (p[chunk[:, i]] for i in range(3))
+                area = 0.5 * cp.linalg.norm(cp.cross(b - a, c - a), axis=1)
+                area_sum += cp.bincount(chunk.ravel(), weights=cp.repeat(area, 3),
+                                        minlength=n).astype(cp.float32)
+                neighbors += cp.bincount(chunk.ravel(), minlength=n).astype(cp.float32)
+                if not checkpoint("Measuring triangle density", start + len(chunk)):
+                    return None
+            valid = (count > 0) & (area_sum > 0)
+            log = cp.zeros(n, cp.float32)
+            log[valid] = cp.log(cp.maximum(count[valid] / area_sum[valid], cp.float32(1e-30)))
+            neighbor_sum = cp.zeros(n, cp.float32)
+            for start in range(0, len(faces), 250_000):
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
+                chunk = f[start:start + 250_000]
+                mean = log[chunk].mean(axis=1)
+                neighbor_sum += cp.bincount(chunk.ravel(), weights=cp.repeat(mean, 3),
+                                            minlength=n).astype(cp.float32)
+                if not checkpoint("Smoothing density regions", start + len(chunk)):
+                    return None
+            return cp.asnumpy((log + neighbor_sum) / (1.0 + neighbors)), cp.asnumpy(valid)
+    except Exception:
+        # Optional presentation acceleration includes a CPU fallback for OOM/driver failures.
+        return None
+
+
 def adaptive_probe_projection(
     points: np.ndarray,
     faces: np.ndarray,
@@ -515,13 +602,14 @@ def simplify_depth_adaptive_qem(
     if progress is not None:
         progress("Reducing mesh topology", 0, len(faces) - target)
     qem_started = time.perf_counter()
-    output_points, output_faces = fast_simplification.simplify(
+    output_points, output_faces = simplify_with_progress(
         projected,
         faces,
         target_count=target,
         agg=aggressiveness,
         verbose=False,
         preserve_border=True,
+        progress=progress,
     )
     if progress is not None:
         progress("Reducing mesh topology", len(faces) - len(output_faces), len(faces) - target)
@@ -567,13 +655,14 @@ def simplify_depth_density_adaptive_qem(
     if progress is not None:
         progress("Reducing mesh topology", 0, len(faces) - target)
     qem_started = time.perf_counter()
-    output_points, output_faces = fast_simplification.simplify(
+    output_points, output_faces = simplify_with_progress(
         projected,
         faces,
         target_count=target,
         agg=aggressiveness,
         verbose=False,
         preserve_border=True,
+        progress=progress,
     )
     if progress is not None:
         progress("Reducing mesh topology", len(faces) - len(output_faces), len(faces) - target)

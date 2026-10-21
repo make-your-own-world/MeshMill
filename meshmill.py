@@ -29,6 +29,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import fast_simplification
+from qem_progress import simplify as simplify_with_progress
 import numpy as np
 import vtkmodules.vtkInteractionStyle
 import vtkmodules.vtkRenderingOpenGL2  # noqa: F401
@@ -65,6 +66,10 @@ from PySide6.QtGui import (
     QPixmap,
     QPolygonF,
     QRegion,
+    QShortcut,
+    QTextCharFormat,
+    QTextCursor,
+    QTextTable,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -103,6 +108,7 @@ from vtkmodules.vtkCommonCore import vtkPoints
 from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData, vtkStaticPointLocator
 from vtkmodules.vtkFiltersCore import (
     vtkDecimatePro,
+    vtkPolyDataConnectivityFilter,
     vtkPolyDataNormals,
     vtkQuadricDecimation,
     vtkTriangleFilter,
@@ -275,7 +281,7 @@ SHORTCUT_DEFINITIONS = {
     "zoom_out": ("Zoom out", "Ctrl+Shift+Down"),
     "zoom_in_alt": ("Zoom in (alternate)", "+"),
     "zoom_out_alt": ("Zoom out (alternate)", "-"),
-    "toggle_fullscreen": ("Toggle full screen", "Ctrl+Enter"),
+    "toggle_fullscreen": ("Toggle full screen", "F11"),
     "roll_counterclockwise": ("Roll counterclockwise", "Ctrl+Shift+Left"),
     "roll_clockwise": ("Roll clockwise", "Ctrl+Shift+Right"),
 }
@@ -442,8 +448,8 @@ APPEARANCE_THEMES = {
         "accent_soft": "#1A3B3F", "disabled": "#243744", "support": "#C8EC8D",
         "support_hover": "#B8DD78", "support_border": "#8EB65B",
         "overlay": "rgba(13, 27, 38, 238)", "viewport": "#0B1721", "overlay_text": "#EAF4FB",
-        "optimization": "#49A2FF", "stats": "#20C98A", "general": "#F2BD4B",
-        "optimization_soft": "#173552", "stats_soft": "#173F38", "general_soft": "#40371B",
+        "optimization": "#49A2FF", "stats": "#20C98A", "general": "#49A2FF",
+        "optimization_soft": "#173552", "stats_soft": "#173F38", "general_soft": "#192F3E",
     },
     "Earth Tone": {
         "window": "#F5F3EC", "panel": "#FCFBF6", "surface": "#FFFDF8",
@@ -502,8 +508,9 @@ def app_stylesheet(name: str = DEFAULT_APPEARANCE, font_size: int = 12) -> str:
             "QPushButton[quiet='true'] { background: transparent; text-align: center; }",
             f"QPushButton#versionLabel {{ color: {theme['muted']}; font-size: {compact_font_size}px; border: 0; background: transparent; padding: 2px; }}",
             f"QPushButton#versionLabel:hover {{ color: {theme['accent']}; text-decoration: underline; }}",
-            "QPushButton#fullscreenButton { background: transparent; border: 0; border-radius: 6px; padding: 2px; min-width: 28px; min-height: 24px; }",
-            f"QPushButton#fullscreenButton:hover {{ background: {theme['accent_soft']}; border: 1px solid {theme['border']}; }}",
+            "QPushButton[captionButton='true'] { background: transparent; border: 0; border-radius: 0; padding: 0; min-width: 38px; min-height: 28px; }",
+            f"QPushButton[captionButton='true']:hover {{ background: {theme['accent_soft']}; }}",
+            "QPushButton#captionClose:hover { background: #C42B1C; }",
             f"QComboBox, QSpinBox, QLineEdit, QPlainTextEdit, QTextBrowser {{ background: {theme['field']}; border: 1px solid {theme['border']}; border-radius: 7px; padding: 5px 8px; min-height: 18px; }}",
             f"QComboBox:hover, QSpinBox:hover, QLineEdit:hover {{ border-color: {theme['accent']}; }}",
             "QComboBox::drop-down { border: 0; width: 22px; }",
@@ -543,7 +550,45 @@ def draw_ui_icon(kind: str, color: str, size: int = 18) -> QIcon:
     painter.setBrush(Qt.BrushStyle.NoBrush)
     m = size * 0.16
     r = QRectF(m, m, size - 2 * m, size - 2 * m)
-    if kind == "optimize":
+    if kind.startswith("view-"):
+        vertices = [QPointF(size*x, size*y) for x,y in
+                    ((.50,.28),(.70,.39),(.70,.62),(.50,.51),(.30,.39),(.30,.62),(.50,.74))]
+        for a,b in ((0,1),(1,2),(2,3),(3,0),(0,4),(4,5),(5,6),(6,3),(6,2)):
+            painter.drawLine(vertices[a], vertices[b])
+        direction = kind[5:]
+        origin, destination = {
+            "left": ((.06,.50),(.39,.50)),
+            "right": ((.94,.50),(.61,.50)),
+            "top": ((.50,.05),(.50,.40)),
+            "bottom": ((.50,.96),(.50,.63)),
+            "front": ((.10,.90),(.43,.59)),
+            "back": ((.90,.10),(.59,.40)),
+        }[direction]
+        tail = QPointF(size*origin[0],size*origin[1])
+        tip = QPointF(size*destination[0],size*destination[1])
+        dx,dy = destination[0]-origin[0],destination[1]-origin[1]
+        length = math.hypot(dx,dy)
+        dx,dy = dx/length,dy/length
+        painter.drawLine(tail,tip)
+        painter.drawLine(tip,tip+QPointF((-dx-dy)*size*.10,(-dy+dx)*size*.10))
+        painter.drawLine(tip,tip+QPointF((-dx+dy)*size*.10,(-dy-dx)*size*.10))
+    elif kind == "crop":
+        painter.drawLine(QPointF(size*.30,m),QPointF(size*.30,size*.70))
+        painter.drawLine(QPointF(size*.30,size*.70),QPointF(size-m,size*.70))
+        painter.drawLine(QPointF(m,size*.30),QPointF(size*.70,size*.30))
+        painter.drawLine(QPointF(size*.70,size*.30),QPointF(size*.70,size-m))
+    elif kind == "delete":
+        painter.drawLine(QPointF(m,size*.28),QPointF(size-m,size*.28))
+        painter.drawRoundedRect(QRectF(size*.28,size*.32,size*.44,size*.53),1,1)
+        painter.drawLine(QPointF(size*.40,size*.14),QPointF(size*.60,size*.14))
+    elif kind == "undo":
+        painter.drawArc(QRectF(size*.25,size*.30,size*.60,size*.52),-100*16,260*16)
+        painter.drawLine(QPointF(size*.25,size*.30),QPointF(size*.25,size*.53))
+        painter.drawLine(QPointF(size*.25,size*.53),QPointF(size*.48,size*.53))
+    elif kind == "clear":
+        painter.drawLine(QPointF(size*.27,size*.27),QPointF(size*.73,size*.73))
+        painter.drawLine(QPointF(size*.73,size*.27),QPointF(size*.27,size*.73))
+    elif kind == "optimize":
         painter.drawPolygon(QPolygonF((QPointF(size / 2, m), QPointF(size - m, size - m), QPointF(m, size - m))))
     elif kind == "stats":
         for x, top in ((m, size * .53), (size * .43, size * .30), (size * .70, size * .12)):
@@ -581,6 +626,19 @@ def draw_ui_icon(kind: str, color: str, size: int = 18) -> QIcon:
         painter.drawLine(QPointF(size * .50, size * .13), QPointF(size * .50, size * .60))
         painter.drawLine(QPointF(size * .34, size * .30), QPointF(size * .50, size * .13))
         painter.drawLine(QPointF(size * .66, size * .30), QPointF(size * .50, size * .13))
+    elif kind == "minimize":
+        painter.drawLine(QPointF(size * .25, size * .5), QPointF(size * .75, size * .5))
+    elif kind == "maximize":
+        painter.drawRect(QRectF(size * .27, size * .27, size * .46, size * .46))
+    elif kind == "restore":
+        painter.drawRect(QRectF(size * .22, size * .36, size * .43, size * .43))
+        painter.drawLine(QPointF(size * .36, size * .36), QPointF(size * .36, size * .22))
+        painter.drawLine(QPointF(size * .36, size * .22), QPointF(size * .79, size * .22))
+        painter.drawLine(QPointF(size * .79, size * .22), QPointF(size * .79, size * .65))
+        painter.drawLine(QPointF(size * .79, size * .65), QPointF(size * .65, size * .65))
+    elif kind == "caption-close":
+        painter.drawLine(QPointF(size * .28, size * .28), QPointF(size * .72, size * .72))
+        painter.drawLine(QPointF(size * .72, size * .28), QPointF(size * .28, size * .72))
     elif kind == "fullscreen":
         inset = size * .27
         extent = size * .16
@@ -597,7 +655,7 @@ def draw_ui_icon(kind: str, color: str, size: int = 18) -> QIcon:
 
 
 class ResultBridge(QObject):
-    done = Signal(int, object, object, object, object)
+    done = Signal(int, object, object, object, object, object)
 
 
 class LoadBridge(QObject):
@@ -1353,7 +1411,23 @@ class GeometryActivityGraph(QWidget):
         self.pixels_per_sample = 2
         self.operation = "Idle"
         self.geometry_text = "No mesh loaded"
+        self.apply_appearance(DEFAULT_APPEARANCE)
         self.setFixedHeight(112)
+
+    def apply_appearance(self, name: str) -> None:
+        theme = appearance_theme(name)
+        background, foreground = QColor(theme["panel"]), QColor(theme["text"])
+        dark = background.lightnessF() < 0.5
+        grid = QColor(*[round(background.getRgb()[i] * 0.70 + foreground.getRgb()[i] * 0.30)
+                        for i in range(3)])
+        self.plot_colors = {
+            "background": background, "text": foreground, "grid": grid,
+            "cpu": QColor("#78B7FF" if dark else "#1D4ED8"),
+            "gpu": QColor("#4EE0A7" if dark else "#16723A"),
+            "legend": foreground,
+            "active": QColor(120, 183, 255, 24) if dark else QColor(37, 99, 235, 18),
+        }
+        self.update()
 
     def add_sample(
         self,
@@ -1391,12 +1465,9 @@ class GeometryActivityGraph(QWidget):
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.fillRect(self.rect(), QColor("#FFFFFF"))
-        painter.setPen(QColor("#0B1B34"))
-        painter.drawText(8, 15, f"Geometry activity · {self.operation} · {self.geometry_text}")
-
-        painter.fillRect(QRect(8, 0, max(1, self.width() - 16), 20), QColor("#FFFFFF"))
-        painter.setPen(QColor("#0B1B34"))
+        colors = self.plot_colors
+        painter.fillRect(self.rect(), colors["background"])
+        painter.setPen(colors["text"])
         painter.drawText(
             QRect(8, 0, max(1, self.width() - 16), 20),
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
@@ -1405,7 +1476,7 @@ class GeometryActivityGraph(QWidget):
 
         left, top, right, bottom = 8, 23, self.width() - 8, self.height() - 19
         height = max(1, bottom - top)
-        painter.setPen(QPen(QColor("#E4E1DC"), 1))
+        painter.setPen(QPen(colors["grid"], 1))
         for fraction in (0.25, 0.5, 0.75):
             y = top + height * fraction
             painter.drawLine(left, round(y), right, round(y))
@@ -1413,7 +1484,7 @@ class GeometryActivityGraph(QWidget):
         if self.samples:
             step = self.pixels_per_sample
             start_x = max(left, right - step * max(0, len(self.samples) - 1))
-            active_color = QColor(37, 99, 255, 30)
+            active_color = colors["active"]
             for index, (_, _, active) in enumerate(self.samples):
                 if active:
                     x = start_x + index * step
@@ -1425,7 +1496,7 @@ class GeometryActivityGraph(QWidget):
                         active_color,
                     )
 
-            def draw_line(values: list[float], color: str) -> None:
+            def draw_line(values: list[float], color: QColor) -> None:
                 points = QPolygonF(
                     [
                         QPointF(start_x + index * step, bottom - height * value / 100.0)
@@ -1435,23 +1506,17 @@ class GeometryActivityGraph(QWidget):
                 painter.setPen(QPen(QColor(color), 1.8))
                 painter.drawPolyline(points)
 
-            draw_line([sample[0] for sample in self.samples], "#2563FF")
-            draw_line([sample[1] for sample in self.samples], "#8FCB33")
+            draw_line([sample[0] for sample in self.samples], colors["cpu"])
+            draw_line([sample[1] for sample in self.samples], colors["gpu"])
 
-        painter.setPen(QColor("#2563FF"))
-        painter.drawText(8, self.height() - 5, "CPU")
-        painter.setPen(QColor("#8FCB33"))
-        painter.drawText(38, self.height() - 5, "GPU")
-        painter.setPen(QColor("#6B7280"))
-        painter.drawText(70, self.height() - 5, "geometry processing")
-        painter.fillRect(QRect(0, self.height() - 18, self.width(), 18), QColor("#FFFFFF"))
+        painter.fillRect(QRect(0, self.height() - 18, self.width(), 18), colors["background"])
         legend_y = self.height() - 5
         right_edge = self.width() - 8
         metrics = painter.fontMetrics()
         for text, color in (
-            ("geometry processing", "#6B7280"),
-            ("GPU", "#8FCB33"),
-            ("CPU", "#2563FF"),
+            ("geometry processing", colors["legend"]),
+            ("GPU", colors["gpu"]),
+            ("CPU", colors["cpu"]),
         ):
             painter.setPen(QColor(color))
             text_width = metrics.horizontalAdvance(text)
@@ -1618,19 +1683,42 @@ def arrays_polydata(points: np.ndarray, faces: np.ndarray) -> vtkPolyData:
     return poly
 
 
-def load_stl(path: Path) -> tuple[vtkPolyData, np.ndarray, np.ndarray]:
+def load_stl(
+    path: Path, progress_callback: Callable[[str, int, int], None] | None = None,
+) -> tuple[vtkPolyData, np.ndarray, np.ndarray]:
     reader = vtkSTLReader()
     reader.SetFileName(os.fspath(path))
     reader.MergingOn()
+    file_bytes = path.stat().st_size
+    if progress_callback is not None:
+        progress_callback("Reading mesh", 0, file_bytes)
+        reader.AddObserver(
+            "ProgressEvent",
+            lambda source, _event: progress_callback(
+                "Reading mesh", round(source.GetProgress() * file_bytes), file_bytes
+            ),
+        )
     reader.Update()
     triangle = vtkTriangleFilter()
     triangle.SetInputConnection(reader.GetOutputPort())
+    if progress_callback is not None:
+        progress_callback("Preparing triangles", 0, reader.GetOutput().GetNumberOfPolys())
+        triangle.AddObserver(
+            "ProgressEvent",
+            lambda source, _event: progress_callback(
+                "Preparing triangles",
+                round(source.GetProgress() * reader.GetOutput().GetNumberOfPolys()),
+                reader.GetOutput().GetNumberOfPolys(),
+            ),
+        )
     triangle.Update()
     poly = vtkPolyData()
     poly.DeepCopy(triangle.GetOutput())
     if poly.GetNumberOfPolys() == 0:
         raise ValueError("No triangles were found in the file.")
     points, faces = polydata_arrays(poly)
+    if progress_callback is not None:
+        progress_callback("Preparing triangles", len(faces), len(faces))
     return poly, points, faces
 
 
@@ -1751,11 +1839,17 @@ def load_stl_smart(
             "tiled_auto_selected": use_auto_tiles,
             "tiled_runtime_estimate": break_even,
         }
-    poly, points, faces = load_stl(path)
+    poly, points, faces = load_stl(path, progress_callback=progress_callback)
+    if progress_callback is not None:
+        progress_callback("Measuring source geometry", 0, len(faces))
+    measurements = source_geometry_measurements(points, faces, progress_callback, cancel_event)
+    rendered = prepare_viewport_poly(poly, progress_callback)
     return poly, points, faces, {
         "overview": False,
         "total_triangles": len(faces),
         "estimated_memory": estimated_memory,
+        "measurements": measurements,
+        "render_poly": rendered,
     }
 
 
@@ -1901,6 +1995,11 @@ class MeshInteractorStyle(vtkInteractorStyleTrackballCamera):
         self._loupe_callback = loupe_callback
         self._crop_callback = crop_callback
         self._keyboard_nav_callback = keyboard_nav_callback
+        self._wheel_timer = QTimer(widget)
+        self._wheel_timer.setInterval(16)
+        self._wheel_timer.timeout.connect(self._advance_wheel)
+        self._wheel_steps = 0
+        self._wheel_command = None
         self._measurement_callback = measurement_callback
         self._right_down = False
         self._crop_down = False
@@ -1928,11 +2027,13 @@ class MeshInteractorStyle(vtkInteractorStyleTrackballCamera):
         self.AddObserver("KeyReleaseEvent", self._key_release)
 
     def _left_press(self, _obj, _event) -> None:
+        self._wheel_timer.stop()
+        self._wheel_steps = 0
         if (
             self.GetInteractor().GetShiftKey()
             and not self.GetInteractor().GetControlKey()
-            and self._measurement_callback("click", self.GetInteractor().GetEventPosition())
         ):
+            self._measurement_callback("click", self.GetInteractor().GetEventPosition())
             self._consume_left_release = True
             return
         if self.GetInteractor().GetControlKey():
@@ -2180,7 +2281,7 @@ class MeshInteractorStyle(vtkInteractorStyleTrackballCamera):
             renderer.ResetCameraClippingRange()
             interactor.Render()
 
-    def _zoom_at_cursor(self, factor: float) -> None:
+    def _zoom_at_cursor(self, factor: float, movement_scale: float = 1.) -> None:
         interactor = self.GetInteractor()
         x, y = interactor.GetEventPosition()
         self.FindPokedRenderer(x, y)
@@ -2231,7 +2332,7 @@ class MeshInteractorStyle(vtkInteractorStyleTrackballCamera):
                 diagonal = float(np.linalg.norm(bounds[[1, 3, 5]] - bounds[[0, 2, 4]]))
             else:
                 diagonal = 0.0
-            minimum_step = max(diagonal * 0.0015, 1e-6)
+            minimum_step = max(diagonal * 0.0015, 1e-6) * movement_scale
             view_direction = np.asarray(camera.GetDirectionOfProjection(), dtype=float)
             view_direction /= max(float(np.linalg.norm(view_direction)), 1e-12)
             forward_depth = float(ray @ view_direction)
@@ -2267,18 +2368,41 @@ class MeshInteractorStyle(vtkInteractorStyleTrackballCamera):
     def _wheel_forward(self, _obj, _event) -> None:
         self._crop_callback("navigation", None)
         if self.GetInteractor().GetControlKey():
-            self._roll_at_view_center(-5.0 if not self.invert_horizontal else 5.0)
+            self._queue_wheel("roll", -5.0 if not self.invert_horizontal else 5.0)
             return
-        self._zoom_at_cursor(1.0 / 1.20 if self.invert_zoom else 1.20)
-        self._measurement_callback("refresh", None)
+        self._queue_wheel("zoom", 1.0 / 1.20 if self.invert_zoom else 1.20)
 
     def _wheel_backward(self, _obj, _event) -> None:
         self._crop_callback("navigation", None)
         if self.GetInteractor().GetControlKey():
-            self._roll_at_view_center(5.0 if not self.invert_horizontal else -5.0)
+            self._queue_wheel("roll", 5.0 if not self.invert_horizontal else -5.0)
             return
-        self._zoom_at_cursor(1.20 if self.invert_zoom else 1.0 / 1.20)
+        self._queue_wheel("zoom", 1.20 if self.invert_zoom else 1.0 / 1.20)
+
+    def _queue_wheel(self, kind: str, amount: float) -> None:
+        command = (kind, amount)
+        self._wheel_steps = min(4, self._wheel_steps + 4) if command == self._wheel_command else 4
+        self._wheel_command = command
+        if not self._wheel_timer.isActive():
+            self._advance_wheel()
+            if self._wheel_steps:
+                self._wheel_timer.start()
+
+    def _advance_wheel(self) -> None:
+        if (not self._wheel_steps or getattr(self._widget.window(), "_closing", False)
+                or getattr(self._widget.window(), "busy", False)):
+            self._wheel_timer.stop()
+            self._wheel_steps = 0
+            return
+        self._wheel_steps -= 1
+        kind, amount = self._wheel_command
+        if kind == "roll":
+            self._roll_at_view_center(amount / 4)
+        else:
+            self._zoom_at_cursor(amount ** .25, movement_scale=.25)
         self._measurement_callback("refresh", None)
+        if not self._wheel_steps:
+            self._wheel_timer.stop()
 
     def _roll_at_view_center(self, degrees: float) -> None:
         interactor = self.GetInteractor()
@@ -2339,6 +2463,75 @@ def mesh_surface_area(
     return area
 
 
+def source_geometry_measurements(points, faces, progress=None, cancel_event=None):
+    """Measure one immutable mesh revision using the existing CPU arithmetic."""
+    bounds = points.max(axis=0) - points.min(axis=0)
+    area = mesh_surface_area(
+        points, faces, cancel_event=cancel_event,
+        progress=(lambda done, total: progress("Measuring source geometry", done, total))
+        if progress is not None else None,
+    )
+    return {"bounds": bounds, "area": area}
+
+
+def prepare_viewport_poly(poly, progress=None):
+    """Prepare the existing display normals without touching editable geometry."""
+    normals = vtkPolyDataNormals()
+    normals.SetInputData(poly)
+    normals.ComputePointNormalsOn()
+    normals.ComputeCellNormalsOff()
+    normals.SplittingOff()
+    normals.ConsistencyOn()
+    if progress is not None:
+        total = poly.GetNumberOfPoints()
+        progress("Preparing viewport normals", 0, total)
+        normals.AddObserver("ProgressEvent", lambda source, _event: progress(
+            "Preparing viewport normals", round(source.GetProgress() * total), total))
+    normals.Update()
+    prepared = vtkPolyData()
+    prepared.DeepCopy(normals.GetOutput())
+    if progress is not None:
+        progress("Preparing viewport normals", total, total)
+    return prepared
+
+
+def readonly_cpu_edge_counts(faces, progress=None, cancel_event=None):
+    """Count edges without changing faces, using exact integer keys when representable."""
+    face_count = len(faces)
+    total = max(4 * face_count, 1)
+    packed = faces.dtype.kind in "iu" and (
+        not faces.size or (int(faces.min()) >= 0 and int(faces.max()) <= 0xFFFFFFFF)
+    )
+    if packed:
+        keys = np.empty(3 * face_count, dtype=np.uint64)
+        for edge_index, (a, b) in enumerate(((0, 1), (1, 2), (2, 0))):
+            for start in range(0, face_count, 262_144):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise OperationCancelled
+                stop = min(start + 262_144, face_count)
+                chunk = faces[start:stop]
+                low = np.minimum(chunk[:, a], chunk[:, b]).astype(np.uint64)
+                high = np.maximum(chunk[:, a], chunk[:, b]).astype(np.uint64)
+                keys[edge_index * face_count + start:edge_index * face_count + stop] = (
+                    (low << np.uint64(32)) | high
+                )
+                if progress is not None:
+                    progress("Preparing topology edges", edge_index * face_count + stop, total)
+        if progress is not None:
+            progress("Sorting topology edges", 3 * face_count, total)
+        _, counts = np.unique(keys, return_counts=True)
+    else:
+        # Preserve the former behavior for identifiers outside the packing range.
+        edges = np.concatenate((faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]))
+        edges.sort(axis=1)
+        if progress is not None:
+            progress("Sorting topology edges", 3 * face_count, total)
+        _, counts = np.unique(edges, axis=0, return_counts=True)
+    if cancel_event is not None and cancel_event.is_set():
+        raise OperationCancelled
+    return counts
+
+
 def mesh_quality_metrics(
     source_points: np.ndarray,
     source_faces: np.ndarray,
@@ -2347,6 +2540,8 @@ def mesh_quality_metrics(
     sample_count: int = 20_000,
     progress: Callable[[str, int, int], None] | None = None,
     cancel_event: threading.Event | None = None,
+    source_measurements: dict | None = None,
+    gpu_preference: str | None = None,
 ) -> dict[str, float]:
     """Calculate compact, deterministic quality indicators for the Stats panel."""
     if not len(source_points) or not len(output_points):
@@ -2378,11 +2573,12 @@ def mesh_quality_metrics(
     area_total = len(source_faces) + len(output_faces)
     if progress is not None:
         progress("Measuring surface area", 0, max(area_total, 1))
-    source_bounds = source_points.max(axis=0) - source_points.min(axis=0)
+    source_bounds = (source_measurements["bounds"] if source_measurements is not None
+                     else source_points.max(axis=0) - source_points.min(axis=0))
     output_bounds = output_points.max(axis=0) - output_points.min(axis=0)
     diagonal = max(float(np.linalg.norm(source_bounds)), 1e-12)
     source_area = max(
-        mesh_surface_area(
+        source_measurements["area"] if source_measurements is not None else mesh_surface_area(
             source_points,
             source_faces,
             progress=(
@@ -2409,19 +2605,14 @@ def mesh_quality_metrics(
     topology_total = max(4 * len(output_faces), 1)
     if progress is not None:
         progress("Preparing topology edges", 0, topology_total)
-    edges = np.concatenate(
-        (output_faces[:, [0, 1]], output_faces[:, [1, 2]], output_faces[:, [2, 0]])
-    )
     if cancel_event is not None and cancel_event.is_set():
         raise OperationCancelled
-    if progress is not None:
-        progress("Preparing topology edges", len(edges), topology_total)
-    edges.sort(axis=1)
-    if cancel_event is not None and cancel_event.is_set():
-        raise OperationCancelled
-    if progress is not None:
-        progress("Sorting topology edges", int(3.5 * len(output_faces)), topology_total)
-    _, edge_counts = np.unique(edges, axis=0, return_counts=True)
+    edge_counts = None
+    if gpu_preference is not None:
+        from depth_adaptive_qem import readonly_gpu_edge_counts
+        edge_counts = readonly_gpu_edge_counts(output_faces, gpu_preference)
+    if edge_counts is None:
+        edge_counts = readonly_cpu_edge_counts(output_faces, progress, cancel_event)
     if progress is not None:
         progress("Checking mesh topology", topology_total, topology_total)
     return {
@@ -2472,15 +2663,16 @@ def mesh_quality_baseline(
     }
 
 
-def smart_target(points: np.ndarray, faces: np.ndarray, quality: str) -> int:
-    bounds_min = points.min(axis=0)
-    bounds_max = points.max(axis=0)
-    diagonal = float(np.linalg.norm(bounds_max - bounds_min))
+def smart_target(points: np.ndarray, faces: np.ndarray, quality: str, measurements=None) -> int:
+    bounds = (measurements["bounds"] if measurements is not None
+              else points.max(axis=0) - points.min(axis=0))
+    diagonal = float(np.linalg.norm(bounds))
     if diagonal <= 0:
         return min(50_000, len(faces))
     desired_edge = diagonal / SMART_DIVISORS[quality]
     ideal_triangle_area = (math.sqrt(3.0) / 4.0) * desired_edge * desired_edge
-    estimate = round(mesh_surface_area(points, faces) / ideal_triangle_area)
+    area = measurements["area"] if measurements is not None else mesh_surface_area(points, faces)
+    estimate = round(area / ideal_triangle_area)
     # The surface-area estimate remains the driver, while the quality bands
     # prevent a noisy scan from making every preset nearly full density.
     quality_cap = {"Draft": 0.15, "Balanced": 0.50, "Fine": 0.75}[quality]
@@ -2530,15 +2722,13 @@ def density_color_stops(
     )
 
 
-def point_density_colors(
+def _cpu_density_field(
     points: np.ndarray,
     faces: np.ndarray,
     cancel_event: threading.Event | None = None,
     progress: Callable[[str, int, int], None] | None = None,
-    base_color: tuple[int, int, int] | None = None,
-    dense_color: tuple[int, int, int] | None = None,
-) -> np.ndarray:
-    """Return RGB colors from smoothed local spacing and robust log-density z-scores."""
+) -> tuple[np.ndarray, np.ndarray]:
+    """Measure the reference display density without modifying geometry."""
     point_count = len(points)
     incident_count = np.bincount(faces.ravel(), minlength=point_count).astype(np.float32)
     incident_area = np.zeros(point_count, dtype=np.float32)
@@ -2590,7 +2780,31 @@ def point_density_colors(
         where=(1.0 + neighbor_count) > 0,
     )
 
-    normalized = np.zeros(point_count, dtype=np.float64)
+    return smoothed, valid
+
+
+def point_density_colors(
+    points: np.ndarray,
+    faces: np.ndarray,
+    cancel_event: threading.Event | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
+    base_color: tuple[int, int, int] | None = None,
+    dense_color: tuple[int, int, int] | None = None,
+    gpu_preference: str | None = None,
+) -> np.ndarray:
+    """Map read-only local density to the active palette, with optional GPU measurement."""
+    field = None
+    if cancel_event is not None and cancel_event.is_set():
+        raise OperationCancelled
+    if gpu_preference is not None:
+        from depth_adaptive_qem import readonly_gpu_density_field
+        field = readonly_gpu_density_field(points, faces, gpu_preference, progress, cancel_event)
+    if cancel_event is not None and cancel_event.is_set():
+        raise OperationCancelled
+    if field is None:
+        field = _cpu_density_field(points, faces, cancel_event, progress)
+    smoothed, valid = field
+    normalized = np.zeros(len(points), dtype=np.float64)
     if np.any(valid):
         values = smoothed[valid]
         median = float(np.median(values))
@@ -2638,19 +2852,21 @@ def point_density_cell_colors(
 
 
 def density_balance_arrays(
-    points: np.ndarray, faces: np.ndarray, target: int, aggressiveness: float
+    points: np.ndarray, faces: np.ndarray, target: int, aggressiveness: float,
+    progress: Callable[[str, int, int], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Use conservative QEM so redundant flat sampling collapses before geometric detail."""
     # QEM already incorporates local surface curvature in its accumulated plane error. The old
     # voxel-average prepass moved vertices before measuring that error and visibly distorted scans.
     quality_aggressiveness = min(5.0, max(0.0, aggressiveness * 0.70))
-    return fast_simplification.simplify(
+    return simplify_with_progress(
         points,
         faces,
         target_count=target,
         agg=quality_aggressiveness,
         verbose=False,
         preserve_border=True,
+        progress=progress,
     )
 
 
@@ -2680,11 +2896,12 @@ def simplify_arrays(
         )
         return output_points, output_faces
     if algorithm == "Fast QEM":
-        return fast_simplification.simplify(
-            points, faces, target_reduction=reduction, agg=aggressiveness, verbose=False
+        return simplify_with_progress(
+            points, faces, target_reduction=reduction, agg=aggressiveness, verbose=False,
+            progress=progress,
         )
     if algorithm == "Density balanced":
-        return density_balance_arrays(points, faces, target, aggressiveness)
+        return density_balance_arrays(points, faces, target, aggressiveness, progress=progress)
     source = arrays_polydata(points, faces)
     if algorithm == "Shape preserving":
         decimator = vtkQuadricDecimation()
@@ -2700,6 +2917,10 @@ def simplify_arrays(
         decimator.BoundaryVertexDeletionOff()
     else:
         raise ValueError(f"Unknown optimization algorithm: {algorithm}")
+    if progress is not None:
+        decimator.AddObserver("ProgressEvent", lambda source, _event: progress(
+            "Reducing mesh topology", round(source.GetProgress() * len(faces)), len(faces)
+        ))
     decimator.Update()
     return polydata_arrays(decimator.GetOutput())
 
@@ -2710,10 +2931,13 @@ def _write_process_progress(
     if not progress_path:
         return
     try:
-        Path(progress_path).write_text(
+        destination = Path(progress_path)
+        pending = destination.with_suffix(destination.suffix + ".pending")
+        pending.write_text(
             json.dumps({"stage": stage, "completed": completed, "total": total}),
             encoding="utf-8",
         )
+        os.replace(pending, destination)
     except OSError:
         pass
 
@@ -2725,6 +2949,7 @@ def simplify_process_job(
     algorithm: str,
     gpu_preference: str = "system",
     progress_path: str | None = None,
+    source_measurements: dict | None = None,
 ):
     """Run native simplification outside the UI process."""
     try:
@@ -2734,7 +2959,10 @@ def simplify_process_job(
         p_out, f_out = simplify_arrays(
             points, faces, target, algorithm, gpu_preference=gpu_preference, progress=report
         )
-        metrics = mesh_quality_metrics(points, faces, p_out, f_out, progress=report)
+        metrics = mesh_quality_metrics(
+            points, faces, p_out, f_out, progress=report, source_measurements=source_measurements,
+            gpu_preference=gpu_preference if is_gpu_guided_algorithm(algorithm) else None,
+        )
         report("Preparing optimized mesh", 1, 1)
         return p_out, f_out, metrics, None
     except Exception:  # noqa: BLE001 - worker boundary returns tracebacks to the UI process
@@ -2868,9 +3096,205 @@ def cli_main(argv: list[str]) -> int:
     return 0
 
 
+def filter_preferences_sections(sections, query: str) -> int:
+    """Filter setting rows while retaining their labels, fields, and related actions."""
+    words = query.casefold().split()
+
+    def widget_text(widgets):
+        return " ".join(widget.text() for widget in widgets
+                        if isinstance(widget, (QLabel, QCheckBox))).casefold()
+
+    def layout_widgets(layout):
+        result = []
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            if item.widget() is not None:
+                result.append(item.widget())
+            elif item.layout() is not None:
+                result.extend(layout_widgets(item.layout()))
+        return result
+
+    def collect(layout, groups, headers, names):
+        if isinstance(layout, QFormLayout):
+            for row in range(layout.rowCount()):
+                widgets = []
+                for role in (QFormLayout.ItemRole.LabelRole, QFormLayout.ItemRole.FieldRole):
+                    item = layout.itemAt(row, role)
+                    if item is not None:
+                        widgets.extend([item.widget()] if item.widget() is not None else
+                                       layout_widgets(item.layout()) if item.layout() is not None else [])
+                if widgets:
+                    groups.append(widgets)
+                    label = layout.itemAt(row, QFormLayout.ItemRole.LabelRole)
+                    names[id(widgets)] = widget_text([label.widget()]) if label and label.widget() else ""
+        elif isinstance(layout, QGridLayout):
+            grid_header, grid_rows = [], []
+            for row in range(layout.rowCount()):
+                widgets = []
+                for index in range(layout.count()):
+                    if layout.getItemPosition(index)[0] == row:
+                        item = layout.itemAt(index)
+                        widgets.extend([item.widget()] if item.widget() is not None else
+                                       layout_widgets(item.layout()) if item.layout() is not None else [])
+                if widgets:
+                    if row == 0:
+                        grid_header = widgets
+                    else:
+                        groups.append(widgets)
+                        grid_rows.append(widgets)
+                        # Data-only comparison cells are values, not preference names.
+                        editable = any(not isinstance(widget, QLabel) for widget in widgets)
+                        names[id(widgets)] = widget_text(widgets[:1]) if editable else ""
+            if grid_header:
+                headers.append((grid_header, grid_rows))
+        elif isinstance(layout, QHBoxLayout):
+            widgets = layout_widgets(layout)
+            groups.append(widgets)
+            names[id(widgets)] = ""
+        else:
+            for index in range(layout.count()):
+                item = layout.itemAt(index)
+                if item.layout() is not None:
+                    collect(item.layout(), groups, headers, names)
+                elif item.widget() is not None:
+                    widgets = [item.widget()]
+                    groups.append(widgets)
+                    names[id(widgets)] = (widget_text(widgets) if isinstance(item.widget(), QCheckBox)
+                                          else str(item.widget().property("preferenceSearchName") or "").casefold())
+
+    visible_count = 0
+    for frame in sections:
+        if not hasattr(frame, "_preferences_search_rows"):
+            groups, headers, names = [], [], {}
+            collect(frame.layout(), groups, headers, names)
+            heading = groups.pop(0)  # The section title is retained with matching rows.
+            original_visibility = {widget: not widget.isHidden()
+                                   for group in [heading, *groups, *[h[0] for h in headers]]
+                                   for widget in group}
+            frame._preferences_search_rows = heading, groups, headers, original_visibility, names
+        heading, groups, headers, original_visibility, names = frame._preferences_search_rows
+        context = widget_text(heading)
+        any_visible = False
+        for group in groups:
+            searchable = context + " " + names[id(group)]
+            matched = all(word in searchable for word in words)
+            for widget in group:
+                predicate = getattr(widget, "_preferences_search_allowed", None)
+                allowed = predicate() if predicate is not None else original_visibility[widget]
+                widget.setVisible(matched and allowed)
+                any_visible |= matched and allowed
+        for widget in heading:
+            widget.setVisible(any_visible and original_visibility[widget])
+        for header, rows in headers:
+            show_header = any(not widget.isHidden() for row in rows for widget in row)
+            for widget in header:
+                widget.setVisible(show_header and original_visibility[widget])
+        frame.setVisible(any_visible)
+        visible_count += int(any_visible)
+    return visible_count
+
+
+def create_changelog_viewer(markdown: str, theme_name: str, parent=None) -> QTextBrowser:
+    """Render release Markdown with explicit document and scrollbar theme colors."""
+    theme = appearance_theme(theme_name)
+    background, text = QColor(theme["field"]), QColor(theme["text"])
+    dark = background.lightnessF() < 0.5
+    link = QColor("#8CC5FF" if dark else "#1D4ED8")
+    visited = QColor("#D8B4FE" if dark else "#6B21A8")
+    viewer = QTextBrowser(parent)
+    viewer.setObjectName("changelogViewer")
+    viewer.setReadOnly(True)
+    viewer.setOpenExternalLinks(True)
+    viewer.document().setBaseUrl(QUrl(REPOSITORY_URL.rstrip("/") + "/blob/main/"))
+    viewer.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+    viewer.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    palette = viewer.palette()
+    for role, color in ((QPalette.ColorRole.Base, background), (QPalette.ColorRole.Text, text),
+                        (QPalette.ColorRole.Link, link), (QPalette.ColorRole.LinkVisited, visited),
+                        (QPalette.ColorRole.Highlight, QColor("#1D4ED8")),
+                        (QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))):
+        palette.setColor(role, color)
+    viewer.setPalette(palette)
+    viewer.setStyleSheet(
+        f"QTextBrowser#changelogViewer {{ background: {background.name()}; color: {text.name()}; }}"
+        f"QScrollBar {{ background: {theme['surface']}; border: 1px solid {theme['border']}; }}"
+        "QScrollBar:vertical { width: 14px; } QScrollBar:horizontal { height: 14px; }"
+        f"QScrollBar::handle {{ background: {theme['muted']}; border-radius: 5px; margin: 2px; }}"
+        "QScrollBar::handle:vertical { min-height: 24px; }"
+        "QScrollBar::handle:horizontal { min-width: 24px; }"
+        f"QScrollBar::handle:hover {{ background: {theme['text']}; }}"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
+        "QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }"
+        f"QAbstractScrollArea::corner {{ background: {theme['surface']}; }}"
+    )
+    viewer.document().setDefaultStyleSheet(
+        f"body {{ color: {text.name()}; }} a {{ color: {link.name()}; text-decoration: underline; }}"
+        f"pre, code {{ color: {text.name()}; background-color: {theme['surface']}; }}"
+        f"td, th {{ border: 1px solid {theme['border']}; padding: 5px; }}"
+    )
+    viewer.setMarkdown(markdown)
+    # Markdown imports may carry default blue anchors or explicit code backgrounds,
+    # independent of the widget palette. Normalize colors while retaining formatting.
+    ranges = []
+    block = viewer.document().begin()
+    while block.isValid():
+        iterator = block.begin()
+        while not iterator.atEnd():
+            fragment = iterator.fragment()
+            if fragment.isValid():
+                ranges.append((fragment.position(), fragment.length(), fragment.charFormat()))
+            iterator += 1
+        block = block.next()
+    for position, length, original in ranges:
+        cursor = QTextCursor(viewer.document())
+        cursor.setPosition(position)
+        cursor.setPosition(position + length, QTextCursor.MoveMode.KeepAnchor)
+        formatting = QTextCharFormat()
+        formatting.setForeground(link if original.isAnchor() else text)
+        if original.isAnchor():
+            formatting.setFontUnderline(True)
+            href = QUrl(original.anchorHref())
+            if href.isRelative():
+                formatting.setAnchorHref(viewer.document().baseUrl().resolved(href).toString())
+        if original.background().style() != Qt.BrushStyle.NoBrush:
+            formatting.setBackground(QColor(theme["surface"]))
+        cursor.mergeCharFormat(formatting)
+    def theme_frames(frame):
+        for child in frame.childFrames():
+            if isinstance(child, QTextTable):
+                formatting = child.format()
+                formatting.setBorderBrush(QColor(theme["border"]))
+                formatting.setBackground(background)
+                child.setFormat(formatting)
+            theme_frames(child)
+    theme_frames(viewer.document().rootFrame())
+    return viewer
+
+
+class WindowTitleBar(QFrame):
+    """A single caption row with OS-managed dragging and window controls."""
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and not self.window().isFullScreen():
+            handle = self.window().windowHandle()
+            if handle is not None and handle.startSystemMove():
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.window()._toggle_maximized()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.settings = QSettings("MeshMill", "MeshMill")
         self.gpu_preference = str(
             self.settings.value("performance/gpu_preference", "system")
@@ -2942,6 +3366,13 @@ class MainWindow(QMainWindow):
             ).toString(QKeySequence.SequenceFormat.PortableText)
             for shortcut_id, (_label, default_sequence) in SHORTCUT_DEFINITIONS.items()
         }
+        if self.shortcuts["toggle_fullscreen"] in {"Ctrl+Enter", "Ctrl+Return"}:
+            self.shortcuts["toggle_fullscreen"] = "F11"
+            self.settings.setValue("shortcuts/toggle_fullscreen", "F11")
+        self.fullscreen_shortcut = QShortcut(QKeySequence(self.shortcuts["toggle_fullscreen"]), self)
+        self.fullscreen_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self.fullscreen_shortcut.setAutoRepeat(False)
+        self.fullscreen_shortcut.activated.connect(self._toggle_full_screen)
         self.setWindowTitle(APP_NAME)
         self._apply_appearance()
         icon_path = resource_path("assets/meshmill-mark.svg")
@@ -3104,6 +3535,8 @@ class MainWindow(QMainWindow):
         self.selection_undo_button: QPushButton | None = None
         self.crop_info_user_positioned = False
         self.crop_points: list[QPoint] = []
+        self.crop_world_points: list[np.ndarray] = []
+        self._crop_projection_pending = False
         self.crop_drag_index: int | None = None
         self.crop_selection_actor: vtkActor | None = None
         self.crop_overlay_actors: list[vtkActor2D] = []
@@ -3153,6 +3586,7 @@ class MainWindow(QMainWindow):
         self.diagnostic_log_path: Path | None = None
         self._last_diagnostic_camera_time = 0.0
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mesh-reducer")
+        self.source_measurement_cache = None
         self.update_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="update-check")
         self.optimization_executor = ProcessPoolExecutor(
             max_workers=1, mp_context=multiprocessing.get_context("spawn")
@@ -3172,6 +3606,11 @@ class MainWindow(QMainWindow):
         self.timer.setSingleShot(True)
         self.timer.setInterval(650)
         self.timer.timeout.connect(self.preview)
+        self.navigation_timer = QTimer(self)
+        self.navigation_timer.setInterval(16)
+        self.navigation_timer.timeout.connect(self._advance_navigation)
+        self._navigation_steps = 0
+        self._navigation_command = None
         self.measure_pick_timer = QTimer(self)
         self.measure_pick_timer.setSingleShot(True)
         self.measure_pick_timer.setInterval(35)
@@ -3184,18 +3623,48 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        app_header = QFrame(root)
+        app_header = WindowTitleBar(root)
+        self.app_header = app_header
         app_header.setObjectName("appHeader")
-        app_header.setFixedHeight(30)
+        app_header.setMinimumHeight(34)
         app_header_layout = QHBoxLayout(app_header)
-        app_header_layout.setContentsMargins(8, 2, 8, 2)
+        app_header_layout.setContentsMargins(8, 0, 0, 0)
+        app_header_layout.setSpacing(0)
+        caption_icon = QLabel(app_header)
+        caption_icon.setPixmap(QIcon(os.fspath(resource_path("assets/meshmill-mark.svg"))).pixmap(20, 20))
+        caption_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        app_header_layout.addWidget(caption_icon)
+        self.caption_label = QLabel(self.windowTitle() or APP_NAME, app_header)
+        self.caption_label.setContentsMargins(8, 0, 8, 0)
+        self.caption_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.windowTitleChanged.connect(self.caption_label.setText)
+        app_header_layout.addWidget(self.caption_label)
         app_header_layout.addStretch(1)
         self.fullscreen_button = QPushButton(app_header)
         self.fullscreen_button.setObjectName("fullscreenButton")
-        self.fullscreen_button.setToolTip("Full screen (Ctrl+Enter)")
+        self.fullscreen_button.setProperty("captionButton", True)
+        self.fullscreen_button.setProperty("iconTone", "text")
+        self.fullscreen_button.setAccessibleName("Full screen")
+        self.fullscreen_button.setToolTip("Full screen (F11)")
         self.fullscreen_button.clicked.connect(self._toggle_full_screen)
         self._set_theme_icon(self.fullscreen_button, "fullscreen")
         app_header_layout.addWidget(self.fullscreen_button)
+        for name, label, icon, callback in (
+            ("minimize_button", "Minimize", "minimize", self.showMinimized),
+            ("maximize_button", "Maximize", "maximize", self._toggle_maximized),
+            ("close_button", "Close", "caption-close", self.close),
+        ):
+            button = QPushButton(app_header)
+            button.setObjectName("captionClose" if name == "close_button" else name)
+            button.setProperty("captionButton", True)
+            button.setProperty("iconTone", "text")
+            button.setAccessibleName(label)
+            button.setToolTip(label)
+            button.clicked.connect(callback)
+            self._set_theme_icon(button, icon)
+            app_header_layout.addWidget(button)
+            setattr(self, name, button)
+        self._sync_full_screen_button()
         root_layout.addWidget(app_header)
 
         content = QWidget(root)
@@ -3272,7 +3741,8 @@ class MainWindow(QMainWindow):
         self.redo_button.clicked.connect(self._redo_working_mesh)
         self.history_actions = QFrame()
         history_row = QHBoxLayout(self.history_actions)
-        history_row.setContentsMargins(0, 0, 0, 0)
+        history_row.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        history_row.setContentsMargins(2, 2, 2, 2)
         history_row.setSpacing(6)
         for button in (self.undo_button, self.cancel_preview_button, self.redo_button):
             button.setMinimumWidth(72)
@@ -3286,8 +3756,9 @@ class MainWindow(QMainWindow):
             frame.setObjectName("toolSection")
             frame.setProperty("sectionTone", tone)
             layout = QVBoxLayout(frame)
-            layout.setContentsMargins(9, 7, 9, 9)
-            layout.setSpacing(6)
+            layout.setContentsMargins(12, 11, 12, 12)
+            layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+            layout.setSpacing(8)
             header = QHBoxLayout()
             header.setContentsMargins(0, 0, 0, 0)
             header.setSpacing(7)
@@ -3622,7 +4093,9 @@ class MainWindow(QMainWindow):
 
         self.comparison_actions = QFrame()
         comparison_row = QHBoxLayout(self.comparison_actions)
-        comparison_row.setContentsMargins(0, 0, 0, 0)
+        comparison_row.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        comparison_row.setContentsMargins(2, 2, 2, 2)
+        comparison_row.setSpacing(6)
         comparison_row.addWidget(self.toggle_mesh_button)
         comparison_row.addWidget(self.previous_mesh_button)
 
@@ -3700,7 +4173,7 @@ class MainWindow(QMainWindow):
         self.vtk_widget.GetRenderWindow().SetMultiSamples(8)
         self.vtk_widget.Initialize()
         self.navigation_style = MeshInteractorStyle(
-            self.vtk_widget, self._show_loupe, self._crop_interaction, self._keyboard_navigate,
+            self.vtk_widget, self._show_loupe, self._crop_interaction, self._queue_keyboard_navigation,
             self._measurement_interaction,
         )
         self.measure_picker = vtkHardwarePicker()
@@ -3747,6 +4220,25 @@ class MainWindow(QMainWindow):
         )
 
     def eventFilter(self, watched, event) -> bool:
+        if (event.type() == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.LeftButton
+                and isinstance(watched, QWidget) and watched.window() is self
+                and not self.isMaximized() and not self.isFullScreen()):
+            edges = self._window_resize_edges(self.mapFromGlobal(event.globalPosition().toPoint()))
+            if edges and self.windowHandle() is not None:
+                if self.windowHandle().startSystemResize(edges):
+                    return True
+        if (watched is self.vtk_widget and event.type() == QEvent.Type.MouseButtonDblClick
+                and event.button() == Qt.MouseButton.LeftButton
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            render_width, render_height = self.vtk_widget.GetRenderWindow().GetSize()
+            position = event.position()
+            self._select_connected_at((
+                round(position.x()*render_width/max(1, self.vtk_widget.width())),
+                round((self.vtk_widget.height()-position.y()-1)*render_height
+                      /max(1, self.vtk_widget.height())),
+            ))
+            return True
         if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Control:
             self.control_key_held = True
         elif event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_Control or event.type() == QEvent.Type.ApplicationDeactivate:
@@ -3795,7 +4287,8 @@ class MainWindow(QMainWindow):
         combination = QKeyCombination(modifiers, Qt.Key(event.key()))
         sequence = QKeySequence(combination).toString(QKeySequence.SequenceFormat.PortableText)
         matching_actions = [
-            shortcut_id for shortcut_id, configured in self.shortcuts.items() if configured == sequence
+            shortcut_id for shortcut_id, configured in self.shortcuts.items()
+            if configured == sequence and shortcut_id != "toggle_fullscreen"
         ]
         action = None
         callback = None
@@ -3878,14 +4371,62 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._schedule_viewport_layout_refresh)
         QTimer.singleShot(100, self._schedule_viewport_layout_refresh)
 
+    def _toggle_maximized(self) -> None:
+        if self.isFullScreen():
+            self.showMaximized()
+        elif self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def _window_resize_edges(self, point: QPoint):
+        edges = Qt.Edge(0)
+        if point.x() < 6:
+            edges |= Qt.Edge.LeftEdge
+        elif point.x() >= self.width() - 6:
+            edges |= Qt.Edge.RightEdge
+        if point.y() < 6:
+            edges |= Qt.Edge.TopEdge
+        elif point.y() >= self.height() - 6:
+            edges |= Qt.Edge.BottomEdge
+        return edges
+
+    def nativeEvent(self, event_type, message):
+        if os.name == "nt" and not self.isMaximized() and not self.isFullScreen():
+            from ctypes import wintypes
+            msg = wintypes.MSG.from_address(int(message))
+            if msg.message == 0x0084:  # WM_NCHITTEST: preserve native resize cursors/borders.
+                rect = wintypes.RECT()
+                if ctypes.windll.user32.GetWindowRect(wintypes.HWND(int(self.winId())), ctypes.byref(rect)):
+                    x = ctypes.c_short(msg.lParam & 0xFFFF).value
+                    y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
+                    border = max(6, round(6 * self.devicePixelRatioF()))
+                    left, right = x < rect.left + border, x >= rect.right - border
+                    top, bottom = y < rect.top + border, y >= rect.bottom - border
+                    hit = (13 if left else 14 if right else 12) if top else (
+                        (16 if left else 17 if right else 15) if bottom else
+                        (10 if left else 11 if right else 0))
+                    if hit:
+                        return True, hit
+        return super().nativeEvent(event_type, message)
+
     def _sync_full_screen_button(self) -> None:
+        sequence = getattr(self, "shortcuts", {}).get("toggle_fullscreen", "F11")
+        shortcut = getattr(self, "fullscreen_shortcut", None)
+        if shortcut is not None:
+            shortcut.setKey(QKeySequence(sequence))
         button = getattr(self, "fullscreen_button", None)
         if button is not None:
-            button.setToolTip(
-                "Exit full screen (Ctrl+Enter)"
-                if self.isFullScreen()
-                else "Full screen (Ctrl+Enter)"
-            )
+            label = "Exit full screen" if self.isFullScreen() else "Full screen"
+            button.setToolTip(f"{label} ({sequence})" if sequence else label)
+            button.setAccessibleName(label)
+        maximize = getattr(self, "maximize_button", None)
+        if maximize is not None:
+            restored = self.isMaximized() or self.isFullScreen()
+            label = "Exit full screen" if self.isFullScreen() else "Restore" if restored else "Maximize"
+            maximize.setToolTip(label)
+            maximize.setAccessibleName(label)
+            self._apply_theme_icon(maximize, "restore" if restored else "maximize")
 
     def _shortcut_callback(self, action: str):
         callbacks = {
@@ -3903,7 +4444,7 @@ class MainWindow(QMainWindow):
             ),
             "selection_clear": (
                 self._clear_selection_and_ruler
-                if self._selected_triangle_count() or self.measure_points or self.measure_hover_world is not None
+                if self._selected_triangle_count() or getattr(self, "crop_points", []) or self.measure_points or self.measure_hover_world is not None
                 else None
             ),
             "display_shaded": lambda: self._set_display_shortcut("Shaded"),
@@ -3951,7 +4492,7 @@ class MainWindow(QMainWindow):
         if action not in navigation:
             return None
         direction, control, shift = navigation[action]
-        return lambda: self._keyboard_navigate(direction, control, shift)
+        return lambda: self._queue_keyboard_navigation(direction, control, shift)
 
     def _set_display_shortcut(self, mode: str) -> None:
         index = self.display_type.findData(mode)
@@ -4009,6 +4550,14 @@ class MainWindow(QMainWindow):
         palette.setColor(QPalette.ColorRole.ToolTipText, QColor(theme["text"]))
         app.setPalette(palette)
         QToolTip.setPalette(palette)
+        graph = getattr(self, "geometry_activity_graph", None)
+        if graph is not None:
+            graph.apply_appearance(self.appearance_theme_name)
+            history_palette = self.metrics_history_scroll.viewport().palette()
+            history_palette.setColor(QPalette.ColorRole.Window, QColor(theme["panel"]))
+            history_palette.setColor(QPalette.ColorRole.Base, QColor(theme["panel"]))
+            self.metrics_history_scroll.viewport().setPalette(history_palette)
+            self.metrics_history_scroll.viewport().setAutoFillBackground(True)
         self._refresh_brand_logo()
         for target, icon_name in getattr(self, "_theme_icon_targets", []):
             if target is not None:
@@ -4084,8 +4633,8 @@ class MainWindow(QMainWindow):
         if controls is None:
             return
         # Wider text needs room before the toolbox starts wrapping labels or clipping controls.
-        width = 352 + (self._font_pixel_size() - 12) * 28
-        controls.setFixedWidth(max(324, min(448, width)))
+        width = 384 + (self._font_pixel_size() - 12) * 28
+        controls.setFixedWidth(max(356, min(480, width)))
         content = getattr(self, "controls_content", None)
         if content is not None:
             content.updateGeometry()
@@ -4098,6 +4647,8 @@ class MainWindow(QMainWindow):
         self._apply_theme_icon(target, icon_name)
 
     def _apply_theme_icon(self, target: QWidget, icon_name: str) -> None:
+        if target is getattr(self, "maximize_button", None):
+            icon_name = "restore" if self.isMaximized() or self.isFullScreen() else "maximize"
         theme = appearance_theme(self.appearance_theme_name)
         tone = str(target.property("iconTone") or "accent")
         color = theme.get(tone, theme["accent"])
@@ -4220,6 +4771,17 @@ class MainWindow(QMainWindow):
         dialog.setModal(True)
         dialog.resize(620, 760)
         outer = QVBoxLayout(dialog)
+        search = QLineEdit(dialog)
+        search.setObjectName("preferencesSearch")
+        search.setPlaceholderText("Search preferences")
+        search.setAccessibleName("Search preferences")
+        search.setClearButtonEnabled(True)
+        outer.addWidget(search)
+        no_matches = QLabel("No matching preferences", dialog)
+        no_matches.setObjectName("preferencesNoMatches")
+        no_matches.hide()
+        outer.addWidget(no_matches)
+        sections = []
         scroll = QScrollArea(dialog)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -4229,6 +4791,7 @@ class MainWindow(QMainWindow):
 
         def section(title: str) -> QVBoxLayout:
             frame = QFrame(content)
+            sections.append(frame)
             frame.setObjectName("settingsSection")
             section_layout = QVBoxLayout(frame)
             section_layout.setContentsMargins(14, 12, 14, 12)
@@ -4348,6 +4911,8 @@ class MainWindow(QMainWindow):
 
         def sync_custom_gradient_visibility() -> None:
             gradient_colors.setVisible(viewport_appearance.currentData() == "custom")
+
+        gradient_colors._preferences_search_allowed = lambda: viewport_appearance.currentData() == "custom"
 
         viewport_appearance.currentIndexChanged.connect(sync_custom_gradient_visibility)
         refresh_gradient_buttons()
@@ -4947,6 +5512,7 @@ class MainWindow(QMainWindow):
 
         reset_layout = section("Reset")
         reset_all_button = QPushButton("Reset all settings", dialog)
+        reset_all_button.setProperty("preferenceSearchName", "Reset all settings")
         reset_all_button.setProperty("quiet", True)
         reset_layout.addWidget(reset_all_button)
         reset_all_requested = {"value": False}
@@ -5026,6 +5592,12 @@ class MainWindow(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         outer.addWidget(buttons)
         localize_widget_tree(dialog)
+        def filter_settings(query: str) -> None:
+            no_matches.setVisible(filter_preferences_sections(sections, query) == 0)
+            scroll.verticalScrollBar().setValue(0)
+        search.textChanged.connect(filter_settings)
+        viewport_appearance.currentIndexChanged.connect(lambda _: filter_settings(search.text()))
+        search.setFocus()
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
@@ -5107,6 +5679,7 @@ class MainWindow(QMainWindow):
             shortcut_id: editor.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
             for shortcut_id, editor in shortcut_edits.items()
         }
+        self._sync_full_screen_button()
         self._refresh_view_button_tooltips()
         self._refresh_display_mode_labels()
 
@@ -5376,6 +5949,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(75, self._refresh_viewport_layout)
 
     def _refresh_viewport_layout(self) -> None:
+        if getattr(self, "_closing", False):
+            return
         root = self.centralWidget()
         layouts = (
             root.layout() if root is not None else None,
@@ -5392,6 +5967,8 @@ class MainWindow(QMainWindow):
         self.metrics_frame.updateGeometry()
         self.vtk_widget.updateGeometry()
         QApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
+        if getattr(self, "_closing", False):
+            return
         self._position_viewport_overlays()
         render_window = self.vtk_widget.GetRenderWindow()
         if render_window is not None and self.vtk_widget.width() > 0 and self.vtk_widget.height() > 0:
@@ -5399,6 +5976,7 @@ class MainWindow(QMainWindow):
             render_window.Render()
 
     def _position_viewport_overlays(self) -> None:
+        self._project_crop_outline()
         self._position_view_pad()
         self._position_orientation_overlays()
         self._position_loading_panel()
@@ -5704,10 +6282,13 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
+            self._sync_full_screen_button()
             self._schedule_viewport_layout_refresh()
 
     def _schedule_viewport_layout_refresh(self) -> None:
         """Refresh after Qt and Windows settle maximized client geometry."""
+        if getattr(self, "_closing", False):
+            return
         for delay in (0, 75, 250):
             QTimer.singleShot(delay, self._refresh_viewport_layout)
 
@@ -5808,6 +6389,7 @@ class MainWindow(QMainWindow):
             "Sorting topology edges",
             "Checking mesh topology",
             "Preparing optimized mesh",
+            "Preparing viewport normals",
         ]
         if title == "Analyzing point density":
             return [
@@ -5818,6 +6400,9 @@ class MainWindow(QMainWindow):
         if title == "Loading":
             return [
                 "Reading mesh",
+                "Preparing triangles",
+                "Measuring source geometry",
+                "Preparing viewport normals",
                 "Measuring mesh bounds",
                 "Planning spatial tiles",
                 "Writing spatial tiles",
@@ -5831,7 +6416,7 @@ class MainWindow(QMainWindow):
                 if is_gpu_guided_algorithm(self.algorithm.currentText())
                 else "Reducing mesh topology"
             )
-            return [first, "Reducing mesh topology", "Finishing topology and surface", *result_analysis]
+            return list(dict.fromkeys([first, "Reducing mesh topology", "Finishing topology and surface", *result_analysis]))
         if title == "Optimizing tiles":
             return ["Optimizing tiles", "Assembling optimized mesh", "Loading optimized mesh", *result_analysis]
         return ["Preparing mesh", title]
@@ -5970,23 +6555,32 @@ class MainWindow(QMainWindow):
 
     def _update_operation_step_progress(self, stage: str, completed: int, total: int) -> None:
         self._transition_operation_runtime(stage)
-        if stage not in self.operation_steps:
-            self.operation_steps.append(stage)
-        self.operation_step_index = self.operation_steps.index(stage)
+        canonical_stage = (
+            "Reducing mesh topology" if stage in {
+                "Preparing QEM vertices", "Preparing QEM triangles", "Building QEM connectivity",
+                "Scanning QEM triangles", "Checking QEM boundaries",
+            } else stage
+        )
+        if canonical_stage not in self.operation_steps:
+            self.operation_steps.insert(self.operation_step_index, canonical_stage)
+        self.operation_step_index = self.operation_steps.index(canonical_stage)
         step_fraction = max(0.0, min(1.0, completed / total)) if total > 0 else 0.0
         overall = round(100.0 * (self.operation_step_index + step_fraction) / len(self.operation_steps))
+        overall = max(self.loading_overall_progress.value(), min(99, overall))
         self.loading_overall_progress.setValue(overall)
         self.loading_overall_progress.setFormat(
             f"Overall {overall}%  •  step {self.operation_step_index + 1}/{len(self.operation_steps)}"
         )
         if total > 0:
-            self.loading_progress.setRange(0, total)
-            self.loading_progress.setValue(max(0, min(completed, total)))
-            self.loading_progress.setFormat(f"{stage}  •  %p%")
+            self.loading_progress.setRange(0, 1000)
+            self.loading_progress.setValue(round(1000 * step_fraction))
+            amount = (f"{fmt_bytes(completed)} / {fmt_bytes(total)}" if stage == "Reading mesh"
+                      else f"{completed:,} / {total:,}")
+            self.loading_progress.setFormat(f"%p%  •  {amount}")
         else:
             self.loading_progress.setRange(0, 100)
             self.loading_progress.setValue(0)
-            self.loading_progress.setFormat("Waiting for work")
+            self.loading_progress.setFormat("Preparing worker")
         self._render_operation_steps()
 
     def _position_loading_panel(self) -> None:
@@ -6004,7 +6598,7 @@ class MainWindow(QMainWindow):
         if not self.busy:
             return
         elapsed = max(0.0, time.monotonic() - self.load_started_at)
-        self.loading_elapsed_label.setText(f"Elapsed: {elapsed:.1f} s")
+        self.loading_elapsed_label.setText(f"Local  •  Elapsed: {elapsed:.1f} s")
         if self.operation_progress_path is not None:
             try:
                 progress_state = json.loads(
@@ -6054,6 +6648,9 @@ class MainWindow(QMainWindow):
         ):
             self.loading_heading.setText("Preparing GPU optimization")
             self.loading_detail_label.setText("Initializing GPU runtime")
+            self.loading_progress.setRange(0, 100)
+            self.loading_progress.setValue(0)
+            self.loading_progress.setFormat(f"GPU setup  •  {elapsed:.1f} s elapsed")
 
     def _set_controls_busy(self, busy: bool) -> None:
         interactive_types = (QPushButton, QCheckBox, QComboBox, QSpinBox, QSlider)
@@ -6167,6 +6764,7 @@ class MainWindow(QMainWindow):
             self.selection_undo_stack = snapshot["selection_undo_stack"]
             self.crop_candidate = snapshot["crop_candidate"]
             self.crop_points = snapshot["crop_points"]
+            self._anchor_crop_outline()
             self.selection_target = snapshot["selection_target"]
             self.selection_base_quality = snapshot["selection_base_quality"]
             self.selection_base_algorithm = snapshot["selection_base_algorithm"]
@@ -6280,6 +6878,7 @@ class MainWindow(QMainWindow):
         self.view_buttons: dict[str, ViewButton] = {}
         for label, direction, row, column in layout:
             button = ViewButton(label, self.view_pad)
+            self._set_theme_icon(button, "view-" + direction)
             button.setCheckable(True)
             button.clicked.connect(lambda _=False, d=direction: self._set_standard_view(d))
             button.orientationRequested.connect(lambda d=direction: self._set_current_view_as(d))
@@ -6300,6 +6899,7 @@ class MainWindow(QMainWindow):
         camera = self.renderer.GetActiveCamera()
         camera.AddObserver("ModifiedEvent", self._update_orientation_indicator)
         camera.AddObserver("ModifiedEvent", self._diagnostic_camera_modified)
+        camera.AddObserver("ModifiedEvent", self._queue_crop_outline_projection)
         self._update_orientation_indicator()
         self.view_pad.adjustSize()
         self.view_pad.raise_()
@@ -6321,6 +6921,21 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "orientation_indicator"):
             return
         camera = self.renderer.GetActiveCamera()
+        ruler_basis = np.asarray((*camera.GetDirectionOfProjection(), *camera.GetViewUp()))
+        previous_basis = getattr(self, "_ruler_camera_basis", None)
+        self._ruler_camera_basis = ruler_basis
+        if (previous_basis is not None and not np.allclose(previous_basis, ruler_basis, atol=1e-8)
+                and (self.measure_points or self.measure_hover_world is not None)
+                and not getattr(self, "_ruler_rotation_check_pending", False)):
+            self._ruler_rotation_check_pending = True
+            def check_rotation():
+                self._ruler_rotation_check_pending = False
+                if getattr(self, "_closing", False):
+                    return
+                current = np.asarray((*camera.GetDirectionOfProjection(), *camera.GetViewUp()))
+                if not np.allclose(previous_basis, current, atol=1e-8):
+                    self._clear_measurements()
+            QTimer.singleShot(0, check_rotation)
         self._update_active_view_button(camera)
         orientation = camera.GetOrientation()
         if any(button.isChecked() for button in self.view_buttons.values()):
@@ -6432,7 +7047,7 @@ class MainWindow(QMainWindow):
     def _set_standard_view(self, direction: str) -> None:
         if direction not in STANDARD_VIEWS:
             return
-        self._detach_selection_polygon_for_navigation()
+        self._preserve_crop_outline_for_navigation()
         if self.active_actor is not None:
             bounds = self.active_actor.GetBounds()
         elif self.source_poly is not None:
@@ -6473,7 +7088,7 @@ class MainWindow(QMainWindow):
     def _set_current_view_as(self, direction: str) -> None:
         if self.source_poly is None:
             return
-        self._detach_selection_polygon_for_navigation()
+        self._preserve_crop_outline_for_navigation()
         camera = self.renderer.GetActiveCamera()
         old_position = np.asarray(camera.GetPosition(), dtype=float).copy()
         old_focal = np.asarray(camera.GetFocalPoint(), dtype=float).copy()
@@ -6654,8 +7269,36 @@ class MainWindow(QMainWindow):
         camera.SetPosition(*(pivot + offset * (next_distance / distance)))
         camera.SetFocalPoint(*pivot)
 
-    def _keyboard_navigate(self, key: str, control: bool, shift: bool) -> bool:
-        self._detach_selection_polygon_for_navigation()
+    def _queue_keyboard_navigation(self, key: str, control: bool, shift: bool) -> bool:
+        if key not in {"left", "right", "up", "down"} or self.busy:
+            return False
+        command = (key, control, shift)
+        if command != self._navigation_command:
+            self._navigation_steps = 0
+        self._navigation_command = command
+        # Four short frames per input, with no accumulating motion backlog.
+        # Reversal replaces pending motion rather than continuing in the old direction.
+        self._navigation_steps = min(4, self._navigation_steps + 4)
+        if not self.navigation_timer.isActive():
+            self._advance_navigation()
+            if self._navigation_steps:
+                self.navigation_timer.start()
+        return True
+
+    def _advance_navigation(self) -> None:
+        if self._navigation_steps <= 0 or self.busy or getattr(self, "_closing", False):
+            self.navigation_timer.stop()
+            self._navigation_steps = 0
+            return
+        self._navigation_steps -= 1
+        self._keyboard_navigate(*self._navigation_command, fraction=.25)
+        if not self._navigation_steps:
+            self.navigation_timer.stop()
+
+    def _keyboard_navigate(self, key: str, control: bool, shift: bool, fraction: float = 1.) -> bool:
+        if key not in {"left", "right", "up", "down"}:
+            return False
+        self._preserve_crop_outline_for_navigation()
         if key in ("left", "right") and self.keyboard_horizontal:
             key = {"left": "right", "right": "left"}[key]
         elif key in ("up", "down"):
@@ -6664,13 +7307,13 @@ class MainWindow(QMainWindow):
                 key = {"up": "down", "down": "up"}[key]
         camera = self.renderer.GetActiveCamera()
         if control and shift and key == "up":
-            self._keyboard_zoom_at_view_center(1.28)
+            self._keyboard_zoom_at_view_center(1.28 ** fraction)
         elif control and shift and key == "down":
-            self._keyboard_zoom_at_view_center(1.0 / 1.28)
+            self._keyboard_zoom_at_view_center(1.28 ** -fraction)
         elif control and shift and key == "left":
-            camera.Roll(5.0)
+            camera.Roll(5.0 * fraction)
         elif control and shift and key == "right":
-            camera.Roll(-5.0)
+            camera.Roll(-5.0 * fraction)
         elif key in ("left", "right", "up", "down"):
             if control:
                 position = np.asarray(camera.GetPosition(), dtype=float)
@@ -6684,7 +7327,7 @@ class MainWindow(QMainWindow):
                 view_up /= max(float(np.linalg.norm(view_up)), 1e-12)
                 right = np.cross(forward, view_up)
                 right /= max(float(np.linalg.norm(right)), 1e-12)
-                amount = distance * 0.035
+                amount = distance * 0.035 * fraction
                 if key == "left":
                     offset = -right * amount
                 elif key == "right":
@@ -6696,18 +7339,28 @@ class MainWindow(QMainWindow):
                 camera.SetPosition(*(position + offset))
                 camera.SetFocalPoint(*(focal + offset))
             else:
-                pivot = self._keyboard_view_pivot()
+                # Re-picking the front surface on each keypress moves the pivot toward the
+                # camera and progressively shortens the orbit radius. Keep one pivot until
+                # another navigation action changes the camera.
+                signature = self._keyboard_camera_signature(camera)
+                orbit = getattr(self, "_keyboard_orbit", None)
+                pivot = (orbit[0] if orbit is not None and orbit[1] == signature
+                         else self._keyboard_view_pivot())
                 if pivot is not None:
                     camera.SetFocalPoint(*pivot)
                 if key == "left":
-                    camera.Azimuth(-5.0)
+                    camera.Azimuth(-5.0 * fraction)
                 elif key == "right":
-                    camera.Azimuth(5.0)
+                    camera.Azimuth(5.0 * fraction)
                 elif key == "up":
-                    camera.Elevation(5.0)
+                    camera.Elevation(5.0 * fraction)
                 else:
-                    camera.Elevation(-5.0)
+                    camera.Elevation(-5.0 * fraction)
                 camera.OrthogonalizeViewUp()
+                self._keyboard_orbit = (
+                    np.asarray(camera.GetFocalPoint(), dtype=float),
+                    self._keyboard_camera_signature(camera),
+                )
         else:
             return False
         # Keyboard navigation bypasses the interactor's mouse-update path. Mark the camera and
@@ -6719,7 +7372,16 @@ class MainWindow(QMainWindow):
         self.vtk_widget.GetRenderWindow().Render()
         return True
 
+    @staticmethod
+    def _keyboard_camera_signature(camera) -> tuple:
+        return (tuple(camera.GetPosition()), tuple(camera.GetFocalPoint()),
+                tuple(camera.GetViewUp()), camera.GetParallelScale(),
+                camera.GetParallelProjection(), camera.GetViewAngle())
+
     def closeEvent(self, event) -> None:
+        self._closing = True
+        self.navigation_timer.stop()
+        self.navigation_style._wheel_timer.stop()
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.update_executor.shutdown(wait=False, cancel_futures=True)
         self.optimization_executor.shutdown(wait=False, cancel_futures=True)
@@ -6802,7 +7464,7 @@ class MainWindow(QMainWindow):
                 "complete": "Spatial index ready",
             }
             _write_process_progress(
-                progress_path, labels.get(stage, stage.capitalize()), completed, total
+                progress_path, labels.get(stage, stage), completed, total
             )
 
         future = self.executor.submit(
@@ -6866,6 +7528,10 @@ class MainWindow(QMainWindow):
         self.source_poly = poly
         self.source_points = points
         self.source_faces = faces
+        self.source_measurement_cache = (
+            (points, faces, metadata["measurements"])
+            if metadata and metadata.get("measurements") is not None else None
+        )
         self.overview_mode = bool(metadata and metadata.get("overview"))
         self.tiled_mode = bool(metadata and metadata.get("tiled_edit"))
         self.tiled_index_directory = (
@@ -6928,7 +7594,8 @@ class MainWindow(QMainWindow):
         with QSignalBlocker(self.target):
             self.target.setRange(1_000, max(1_000, self.overview_total_triangles))
         self._update_dynamic_presets()
-        initial = smart_target(points, faces, self.smart_quality.currentText())
+        initial = smart_target(points, faces, self.smart_quality.currentText(),
+                               self._cached_source_measurements(points, faces))
         if self.tiled_mode:
             initial = round(initial / max(1, len(faces)) * self.overview_total_triangles)
         with QSignalBlocker(self.target):
@@ -6943,7 +7610,7 @@ class MainWindow(QMainWindow):
         self.showing_original = True
         self._update_estimated_size()
         self._update_processing_plan()
-        self._show_poly(poly)
+        self._show_poly(poly, prepared=metadata.get("render_poly") if metadata else None)
         self.timer.stop()
         self.status.setText(
             f"Overview • {fmt_count(len(faces))} sampled of "
@@ -6958,7 +7625,7 @@ class MainWindow(QMainWindow):
 
     def _crop_interaction(self, phase: str, vtk_position) -> bool:
         if phase == "navigation":
-            return self._detach_selection_polygon_for_navigation()
+            return self._preserve_crop_outline_for_navigation()
         if self.overview_mode:
             if phase == "start":
                 self.status.setText("Overview mode is for navigation. Load the full mesh to edit.")
@@ -6979,6 +7646,8 @@ class MainWindow(QMainWindow):
         qt_y = self.vtk_widget.height() - vtk_y
         point = QPoint(x, qt_y)
         if phase == "start":
+            if self.crop_candidate is not None:
+                self.selected_face_mask = self.crop_candidate[3].copy()
             if self.selection_base_quality is None:
                 self.timer.stop()
                 self.selection_base_quality = self.smart_quality.currentText()
@@ -7004,7 +7673,13 @@ class MainWindow(QMainWindow):
             self.crop_start = None
             rect = QRect(start, point).normalized()
             if rect.width() < 8 or rect.height() < 8:
-                self._cancel_crop("Crop cancelled: drag a larger rectangle.")
+                self.crop_points = []
+                self.crop_world_points = []
+                self._update_crop_overlay()
+                if self.selection_undo_stack:
+                    self.selection_undo_stack.pop()
+                if self.crop_candidate is not None:
+                    self._present_selection(*self.crop_candidate)
                 return True
             self.crop_points = [rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft()]
             self._update_crop_overlay()
@@ -7024,9 +7699,8 @@ class MainWindow(QMainWindow):
             if QPolygonF([QPointF(p) for p in self.crop_points]).containsPoint(
                 QPointF(point), Qt.FillRule.OddEvenFill
             ):
-                self._confirm_crop()
                 return True
-            self._detach_selection_polygon_for_navigation()
+            self._preserve_crop_outline_for_navigation()
         elif phase == "edit_move" and self.crop_drag_index is not None:
             self.crop_points[self.crop_drag_index] = point
             self._update_crop_overlay()
@@ -7050,49 +7724,69 @@ class MainWindow(QMainWindow):
                 return True
         return False
 
-    def _detach_selection_polygon_for_navigation(self) -> bool:
-        """Remove stale screen-space geometry while retaining the selected mesh region."""
+    def _preserve_crop_outline_for_navigation(self) -> bool:
+        """Discard the view-specific outline while retaining selected mesh faces."""
         if self.crop_candidate is None or not self.crop_points:
             return False
-        candidate = self.crop_candidate
-        selected_face_mask = candidate[3].copy()
-        info_position = self.crop_info_frame.pos() if self.crop_info_frame is not None else None
-        self._hide_crop_preview()
-        self.crop_candidate = candidate
-        self.selected_face_mask = selected_face_mask
-        self.delete_selection_button.setEnabled(True)
-        self.clear_selection_button.setEnabled(True)
-        self._refresh_persistent_selection()
-        self._show_selection_primary_action()
-        if self.crop_info_label is not None:
-            points, faces = candidate[1], candidate[2]
-            unit = self.units.currentText()
-            size = np.asarray(bounds_size(candidate[0].GetBounds())) / UNIT_MM[unit]
-            self.crop_info_label.setText(
-                f"SELECTION\n"
-                f"Selected: {fmt_count(len(points))} vertices, {fmt_count(len(faces))} triangles\n"
-                f"Mesh share: {self._selection_size_summary(len(faces))}\n"
-                f"Dimensions: {fmt_size(tuple(size))} {unit}\n"
-                "Choose an action • Ctrl+drag adds more"
-            )
-        if self.crop_info_frame is not None:
-            if self.selection_undo_button is not None:
-                self.selection_undo_button.setVisible(self._can_step_back_selection())
-            self.crop_info_frame.adjustSize()
-            self._apply_rounded_mask(self.crop_info_frame, 5)
-            if info_position is not None:
-                self.crop_info_frame.move(info_position)
-            self.crop_info_frame.show()
-            self.crop_info_frame.raise_()
-        self.status.setText("Selection retained")
+        self.crop_points = []
+        self.crop_world_points = []
+        self.crop_drag_index = None
+        self._update_crop_overlay(render=False)
+        self.vtk_widget.update()
         return True
 
-    def _update_crop_overlay(self) -> None:
+    def _anchor_crop_outline(self) -> None:
+        if not self.crop_points:
+            self.crop_world_points = []
+            return
+        points = self.crop_candidate[1] if self.crop_candidate is not None else None
+        center = (points.mean(axis=0) if points is not None and len(points)
+                  else self.renderer.GetActiveCamera().GetFocalPoint())
+        self.renderer.SetWorldPoint(*center, 1.0)
+        self.renderer.WorldToDisplay()
+        depth = self.renderer.GetDisplayPoint()[2]
+        anchors = []
+        for point in self.crop_points:
+            self.renderer.SetDisplayPoint(point.x(), self.vtk_widget.height() - point.y(), depth)
+            self.renderer.DisplayToWorld()
+            world = np.asarray(self.renderer.GetWorldPoint(), dtype=float)
+            if not np.all(np.isfinite(world)) or abs(world[3]) < 1e-12:
+                return
+            anchors.append(world[:3] / world[3])
+        self.crop_world_points = anchors
+
+    def _queue_crop_outline_projection(self, *_args) -> None:
+        if self.crop_world_points and not self._crop_projection_pending and not getattr(self, "_closing", False):
+            self._crop_projection_pending = True
+            def refresh():
+                try:
+                    self._preserve_crop_outline_for_navigation()
+                finally:
+                    self._crop_projection_pending = False
+            QTimer.singleShot(0, refresh)
+
+    def _project_crop_outline(self) -> None:
+        if (getattr(self, "_closing", False) or not self.crop_world_points
+                or self.crop_drag_index is not None or self.crop_start is not None):
+            return
+        projected = []
+        for world in self.crop_world_points:
+            display = self._world_to_display(world)
+            if display is None:
+                return
+            projected.append(QPoint(round(display[0]), round(self.vtk_widget.height() - display[1])))
+        if projected != self.crop_points:
+            self.crop_points = projected
+            self._update_crop_overlay(render=False)
+            self.vtk_widget.update()
+
+    def _update_crop_overlay(self, render: bool = True) -> None:
         for actor in self.crop_overlay_actors:
             self.renderer.RemoveViewProp(actor)
         self.crop_overlay_actors = []
         if len(self.crop_points) < 3:
-            self.vtk_widget.GetRenderWindow().Render()
+            if render:
+                self.vtk_widget.GetRenderWindow().Render()
             return
         vtk_points = vtkPoints()
         height = self.vtk_widget.height()
@@ -7150,7 +7844,8 @@ class MainWindow(QMainWindow):
         self.crop_overlay_actors = [fill_actor, line_actor, handle_actor]
         for actor in self.crop_overlay_actors:
             self.renderer.AddViewProp(actor)
-        self.vtk_widget.GetRenderWindow().Render()
+        if render:
+            self.vtk_widget.GetRenderWindow().Render()
 
     def _world_to_display(self, point: np.ndarray) -> tuple[float, float] | None:
         self.renderer.SetWorldPoint(float(point[0]), float(point[1]), float(point[2]), 1.0)
@@ -7179,6 +7874,9 @@ class MainWindow(QMainWindow):
         mesh_property = self.active_actor.GetProperty()
         representation = mesh_property.GetRepresentation()
         mesh_property.SetRepresentationToSurface()
+        self.measure_picker.InitializePickList()
+        self.measure_picker.AddPickList(self.active_actor)
+        self.measure_picker.PickFromListOn()
         try:
             picked = self.measure_picker.Pick(position[0], position[1], 0.0, self.renderer)
         finally:
@@ -7247,7 +7945,7 @@ class MainWindow(QMainWindow):
         self._update_measure_overlay()
 
     def _clear_selection_and_ruler(self) -> None:
-        had_selection = bool(self._selected_triangle_count())
+        had_selection = bool(self._selected_triangle_count() or self.crop_points)
         had_ruler = bool(self.measure_points) or self.measure_hover_world is not None
         if had_selection:
             self._clear_selection(message=None)
@@ -7415,9 +8113,58 @@ class MainWindow(QMainWindow):
             previous = current
         return inside
 
+    def _select_connected_at(self, position) -> None:
+        if self.busy or self.overview_mode or self.source_poly is None:
+            return
+        world = self._pick_measure_point(position)
+        if world is None:
+            return
+        self.timer.stop()
+        self.crop_start = None
+        self.navigation_style._crop_down = False
+        self.navigation_style._consume_left_release = True
+        self.vtk_widget.setCursor(Qt.CursorShape.ArrowCursor)
+        source_points, source_faces = self.source_points, self.source_faces
+        previous = (self.crop_candidate[3].copy() if self.crop_candidate is not None
+                    else self.selected_face_mask.copy() if self.selected_face_mask is not None
+                    else np.zeros(len(source_faces), dtype=bool))
+        render_width, render_height = self.vtk_widget.GetRenderWindow().GetSize()
+        self._connected_selection_anchor = QPoint(
+            round(position[0]*self.vtk_widget.width()/max(1, render_width)),
+            round(self.vtk_widget.height()-position[1]*self.vtk_widget.height()/max(1, render_height)))
+        token = self._begin_mesh_operation("Selecting connected geometry", "Local")
+
+        def job():
+            try:
+                poly = arrays_polydata(source_points, source_faces)
+                ids = numpy_to_vtk(np.arange(len(source_faces), dtype=np.int64), deep=True)
+                ids.SetName("selection_face_id")
+                poly.GetCellData().AddArray(ids)
+                connectivity = vtkPolyDataConnectivityFilter()
+                connectivity.SetInputData(poly)
+                connectivity.SetExtractionModeToClosestPointRegion()
+                connectivity.SetClosestPoint(*world)
+                connectivity.Update()
+                face_ids = vtk_to_numpy(connectivity.GetOutput().GetCellData().GetArray("selection_face_id"))
+                mask = np.zeros(len(source_faces), dtype=bool)
+                mask[face_ids] = True
+                mask = previous & ~mask if np.all(previous[mask]) else previous | mask
+                used, inverse = np.unique(source_faces[mask], return_inverse=True)
+                points = np.ascontiguousarray(source_points[used])
+                faces = np.ascontiguousarray(inverse.reshape(-1, 3), dtype=np.int32)
+                return {"kind": "connected-selection", "previous": previous, "candidate":
+                        (arrays_polydata(points, faces), points, faces, mask)}
+            except Exception:
+                return {"error": traceback.format_exc()}
+
+        future = self.executor.submit(job)
+        self.operation_future = future
+        future.add_done_callback(lambda f: self.edit_bridge.done.emit(token, f.result()))
+
     def _prepare_polygon_crop(self) -> None:
         if self.source_poly is None or self.source_points is None or self.source_faces is None:
             return
+        self.crop_world_points = []
         self._mark_geometry_activity("Analyzing selection", 3.0)
         if self.crop_info_frame is not None:
             self.crop_info_frame.hide()
@@ -7449,9 +8196,6 @@ class MainWindow(QMainWindow):
             ):
                 selected_face_mask |= self.selected_face_mask
             selected_faces = self.source_faces[selected_face_mask]
-            if len(selected_faces) == 0:
-                self._cancel_crop("Selection is empty.")
-                return
             used = np.unique(selected_faces)
             remap = np.full(len(self.source_points), -1, dtype=np.int64)
             remap[used] = np.arange(len(used))
@@ -7460,13 +8204,14 @@ class MainWindow(QMainWindow):
             cropped = arrays_polydata(points, faces)
         finally:
             QApplication.restoreOverrideCursor()
-        if len(faces) == 0:
-            self._cancel_crop("Selection is empty.")
-            return
+        self._present_selection(cropped, points, faces, selected_face_mask)
+
+    def _present_selection(self, cropped, points, faces, selected_face_mask) -> None:
         self.crop_candidate = (cropped, points, faces, selected_face_mask)
+        self._anchor_crop_outline()
         self._show_crop_highlight(cropped)
-        suggested_target = smart_target(points, faces, self.smart_quality.currentText())
-        maximum = max(4, len(faces) - 1)
+        suggested_target = smart_target(points, faces, self.smart_quality.currentText()) if len(faces) else 0
+        maximum = max(4, len(faces) - 1) if len(faces) else 0
         target = min(self.selection_target or suggested_target, maximum)
         self.selection_target = target
         with QSignalBlocker(self.target):
@@ -7476,8 +8221,9 @@ class MainWindow(QMainWindow):
         self._sync_slider_from_target(len(faces))
         self._update_estimated_size()
         self._show_selection_primary_action()
+        self.preview_button.setEnabled(bool(len(faces)) and not self.busy)
         unit = self.units.currentText()
-        size = np.asarray(bounds_size(cropped.GetBounds())) / UNIT_MM[unit]
+        size = np.asarray(bounds_size(cropped.GetBounds())) / UNIT_MM[unit] if len(faces) else np.zeros(3)
         if self.crop_info_frame is None:
             self.crop_info_frame = DraggableOverlayFrame(self.vtk_widget)
             self.crop_info_frame.movedByUser.connect(self._mark_crop_info_positioned)
@@ -7495,24 +8241,25 @@ class MainWindow(QMainWindow):
             self.crop_info_label = QLabel(self.crop_info_frame)
             self.crop_info_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             info_layout.addWidget(self.crop_info_label)
-            action_row = QGridLayout()
-            action_row.setHorizontalSpacing(6)
-            action_row.setVerticalSpacing(6)
+            action_row = QHBoxLayout()
+            action_row.setSpacing(6)
             action_specs = (
                 ("Crop", "crop", f"Keep only the highlighted triangles. Shortcut: {self.shortcuts['selection_crop']}."),
-                ("Add", "add", f"Save this highlight and select more from another view. Shortcut: {self.shortcuts['selection_add']}."),
-                ("Optimize", "optimize", f"Optimize only the highlighted triangles. Shortcut: {self.shortcuts['selection_optimize']}."),
                 ("Delete", "delete", f"Remove the highlighted triangles. Shortcut: {self.shortcuts['selection_delete']}."),
                 ("Step back", "undo", "Remove the most recently added selection region."),
                 ("Clear", "clear", f"Clear the current selection without changing the mesh. Shortcut: {self.shortcuts['selection_clear']}."),
             )
             for index, (caption, action, help_text) in enumerate(action_specs):
                 button = QPushButton(caption, self.crop_info_frame)
+                button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+                button.setProperty("selectionAction", action)
+                self._set_theme_icon(button, action)
                 button.clicked.connect(lambda _=False, a=action: self._apply_selection_action(a))
                 button.setToolTip(help_text)
                 if action == "undo":
                     self.selection_undo_button = button
-                action_row.addWidget(button, index // 3, index % 3)
+                action_row.addWidget(button)
+            action_row.addStretch(1)
             info_layout.addLayout(action_row)
         self.crop_info_label.setText(
             f"SELECTION\n"
@@ -7522,13 +8269,18 @@ class MainWindow(QMainWindow):
             f"Before: {fmt_count(len(faces))} triangles\n"
             f"Optimization target: {fmt_count(target)} triangles\n"
             f"Drag corners • Left-click line adds • Right-click line removes\n"
-            f"Click inside or press Enter adds the selection"
+            f"Shift+click measures • Enter adds the selection"
         )
+        for button in self.crop_info_frame.findChildren(QPushButton):
+            if button.property("selectionAction") in {"crop", "add", "optimize", "delete"}:
+                button.setEnabled(bool(len(faces)))
         if self.selection_undo_button is not None:
             self.selection_undo_button.setVisible(self._can_step_back_selection())
         self.crop_info_frame.adjustSize()
         self._apply_rounded_mask(self.crop_info_frame, 5)
         polygon_rect = QPolygonF([QPointF(p) for p in self.crop_points]).boundingRect().toRect()
+        if not self.crop_points and hasattr(self, "_connected_selection_anchor"):
+            polygon_rect = QRect(self._connected_selection_anchor, QSize(1, 1))
         label_x = min(polygon_rect.left(), max(8, self.vtk_widget.width() - self.crop_info_frame.width() - 8))
         label_y = min(polygon_rect.bottom() + 8, max(8, self.vtk_widget.height() - self.crop_info_frame.height() - 8))
         if not self.crop_info_user_positioned:
@@ -7543,11 +8295,17 @@ class MainWindow(QMainWindow):
     def _show_crop_highlight(self, poly: vtkPolyData) -> None:
         if self.crop_selection_actor is not None:
             self.renderer.RemoveActor(self.crop_selection_actor)
+            self.crop_selection_actor = None
+        if not poly.GetNumberOfCells():
+            if self.source_actor is not None:
+                self.source_actor.GetProperty().SetOpacity(1.0)
+            return
         mapper = vtkPolyDataMapper()
         mapper.SetInputData(poly)
         mapper.SetResolveCoincidentTopologyToPolygonOffset()
         mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(-3.0, -3.0)
         actor = vtkActor()
+        actor.PickableOff()
         actor.SetMapper(mapper)
         actor.GetProperty().SetColor(0.05, 0.95, 1.0)
         actor.GetProperty().SetOpacity(1.0)
@@ -7597,6 +8355,8 @@ class MainWindow(QMainWindow):
                 )
             return
         cropped, points, faces, selected_face_mask = self.crop_candidate
+        if not len(faces):
+            return
         if action not in {"add", "crop", "optimize", "delete"}:
             return
         self.crop_candidate = None
@@ -7933,6 +8693,15 @@ class MainWindow(QMainWindow):
             self.status.setText("Mesh operation cancelled")
             return
         kind = result["kind"]
+        if kind == "connected-selection":
+            self._end_mesh_operation()
+            self.selected_face_mask = None
+            self.selection_undo_stack.append(result["previous"])
+            self.crop_points = []
+            self.crop_world_points = []
+            self._update_crop_overlay(render=False)
+            self._present_selection(*result["candidate"])
+            return
         removed = int(result["removed"])
         if kind == "optimize":
             self._end_mesh_operation()
@@ -7992,6 +8761,7 @@ class MainWindow(QMainWindow):
             self.renderer.RemoveViewProp(actor)
         self.crop_overlay_actors = []
         self.crop_points = []
+        self.crop_world_points = []
         self.crop_drag_index = None
         if self.crop_selection_actor is not None:
             self.renderer.RemoveActor(self.crop_selection_actor)
@@ -8396,7 +9166,8 @@ class MainWindow(QMainWindow):
             self.status.setText(f"Selection target • {fmt_count(target)} triangles")
             return
         target = smart_target(
-            self.source_points, self.source_faces, self.smart_quality.currentText()
+            self.source_points, self.source_faces, self.smart_quality.currentText(),
+            self._cached_source_measurements(self.source_points, self.source_faces),
         )
         if self.tiled_mode:
             target = round(target / max(1, len(self.source_faces)) * self.overview_total_triangles)
@@ -8483,6 +9254,10 @@ class MainWindow(QMainWindow):
     def preview(self) -> None:
         if self.source_points is None or self.source_faces is None:
             return
+        if self.crop_candidate is not None and not len(self.crop_candidate[2]):
+            self.status.setText("Selection is empty. Resize the outline or clear it.")
+            self.preview_button.setEnabled(False)
+            return
         if self.tiled_mode:
             self._preview_tiled()
             return
@@ -8560,6 +9335,7 @@ class MainWindow(QMainWindow):
             algorithm,
             self.gpu_preference,
             progress_path,
+            self._cached_source_measurements(points, faces),
         )
         self.operation_future = future
 
@@ -8568,7 +9344,7 @@ class MainWindow(QMainWindow):
                 result = result_future.result()
             except Exception:  # noqa: BLE001 - Future may surface any worker exception type
                 result = (None, None, None, traceback.format_exc())
-            self.bridge.done.emit(generation, *result)
+            self._emit_prepared_simplify_result(generation, result, progress_path)
 
         future.add_done_callback(completed)
 
@@ -8648,11 +9424,30 @@ class MainWindow(QMainWindow):
         self.operation_future = future
 
         def completed(result_future) -> None:
-            self.bridge.done.emit(generation, *result_future.result())
+            try:
+                result = result_future.result()
+            except Exception:
+                result = (None, None, None, traceback.format_exc())
+            self._emit_prepared_simplify_result(generation, result, progress_path)
 
         future.add_done_callback(completed)
 
-    def _finish_simplify(self, generation: int, points, faces, metrics, error) -> None:
+    def _emit_prepared_simplify_result(self, generation, result, progress_path):
+        if generation != self.generation:
+            return
+        points, faces, metrics, error = result
+        prepared_viewport = None
+        if error is None:
+            try:
+                poly = arrays_polydata(points, faces)
+                prepared = prepare_viewport_poly(poly, lambda stage, done, total:
+                    _write_process_progress(progress_path, stage, done, total))
+                prepared_viewport = (poly, prepared)
+            except Exception:
+                error = traceback.format_exc()
+        self.bridge.done.emit(generation, points, faces, metrics, error, prepared_viewport)
+
+    def _finish_simplify(self, generation: int, points, faces, metrics, error, prepared_viewport=None) -> None:
         if generation != self.generation:
             return
         self._end_mesh_operation()
@@ -8666,7 +9461,8 @@ class MainWindow(QMainWindow):
             self._set_primary_action(False, True)
             QMessageBox.critical(self, APP_NAME, error)
         elif generation == self.generation:
-            self.preview_poly = arrays_polydata(points, faces)
+            self.preview_poly = (prepared_viewport[0] if prepared_viewport is not None
+                                 else arrays_polydata(points, faces))
             self.preview_is_selection = False
             self.simplified_actor = None
             self.preview_count.setText(fmt_count(len(faces)))
@@ -8679,7 +9475,8 @@ class MainWindow(QMainWindow):
             drift = np.abs(preview_size - source_size)
             self.dimension_drift_model_units = drift
             self._update_dimension_labels()
-            self._show_poly(self.preview_poly, reset_camera=False)
+            self._show_poly(self.preview_poly, reset_camera=False,
+                            prepared=prepared_viewport[1] if prepared_viewport is not None else None)
             self.showing_original = False
             self.toggle_mesh_button.setText("Show original")
             self.toggle_mesh_button.setEnabled(True)
@@ -9144,21 +9941,22 @@ class MainWindow(QMainWindow):
         self._show_loupe(True)
         QTimer.singleShot(250, lambda: self._capture_and_exit(path))
 
-    def _show_poly(self, poly: vtkPolyData, reset_camera: bool = True) -> None:
+    def _cached_source_measurements(self, points, faces):
+        cached = self.source_measurement_cache
+        if cached is not None and cached[0] is points and cached[1] is faces:
+            return cached[2]
+        return None
+
+    def _show_poly(self, poly: vtkPolyData, reset_camera: bool = True, prepared=None) -> None:
         if poly is self.source_poly and self.source_actor is not None:
             actor = self.source_actor
         elif poly is self.preview_poly and self.simplified_actor is not None:
             actor = self.simplified_actor
         else:
-            normals = vtkPolyDataNormals()
-            normals.SetInputData(poly)
-            normals.ComputePointNormalsOn()
-            normals.ComputeCellNormalsOff()
-            normals.SplittingOff()
-            normals.ConsistencyOn()
-            normals.Update()
+            if prepared is None:
+                prepared = prepare_viewport_poly(poly)
             mapper = vtkPolyDataMapper()
-            mapper.SetInputConnection(normals.GetOutputPort())
+            mapper.SetInputData(prepared)
             actor = vtkActor()
             actor.SetMapper(mapper)
             actor.GetProperty().SetColor(0.76, 0.80, 0.84)
@@ -9390,6 +10188,7 @@ class MainWindow(QMainWindow):
             density_dense = None
         progress_path = self._start_operation_progress(token, "Measuring triangle density")
         _write_process_progress(progress_path, "Measuring triangle density", 0, len(faces))
+        density_gpu_preference = self.gpu_preference
 
         def job():
             try:
@@ -9403,6 +10202,7 @@ class MainWindow(QMainWindow):
                         ),
                         base_color=density_base,
                         dense_color=density_dense,
+                        gpu_preference=density_gpu_preference,
                     ),
                     None,
                 )
@@ -9876,10 +10676,8 @@ class MainWindow(QMainWindow):
                 ),
             )
             changelog_layout = QVBoxLayout(changelog)
-            viewer = QTextBrowser(changelog)
-            viewer.setReadOnly(True)
-            viewer.setOpenExternalLinks(True)
-            viewer.setMarkdown(changelog_text(current_only))
+            viewer = create_changelog_viewer(
+                changelog_text(current_only), self.appearance_theme_name, changelog)
             changelog_layout.addWidget(viewer)
             close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=changelog)
             close.rejected.connect(changelog.reject)

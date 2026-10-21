@@ -2,7 +2,76 @@
 
 Published releases are listed newest first. Preview builds are marked separately.
 
-## 0.3.0 - Unreleased
+## 0.3.1
+
+### Performance and progress
+
+- Reduced loading and result-display overhead while retaining the existing reduction algorithms.
+- Added optional CUDA acceleration for density visualization on larger meshes, using the selected
+  GPU with a CPU fallback when acceleration is unavailable or resources are insufficient.
+- Moved display-normal preparation into background work before handing geometry to the viewport.
+- Reused measurements of unchanged source geometry and accelerated read-only topology checks.
+- Count topology edges using packed integer keys, with optional GPU counting and an equivalent
+  CPU fallback. These checks report result quality without changing the mesh.
+- Process GPU density visualization in bounded batches, with resource checks, cancellation, and
+  CPU fallback. Reuse completed density fields when switching back to a cached display.
+- Added native QEM stage/count reporting and STL-reader progress without changing collapse decisions.
+- Made progress-file updates atomic so readers do not encounter partially written status data.
+- Identify processing as local and keep controls busy until the prepared viewport is ready.
+- Keep connected-component selection off the UI thread, so its connectivity analysis does not
+  run inside the input handler.
+
+In a matched full-scan comparison, launch through a completed preview improved from **25.31 to
+23.04 seconds in Wireframe (9%)**, and from **26.20 to 22.74 seconds in Density (13%)**. Warmed
+density-color calculation improved from **1.50 to 0.45 seconds**, approximately **3.3x faster**.
+Command-line execution was essentially unchanged, and exported triangle payloads matched exactly.
+These are development measurements against installed 0.3.0, not a general QEM speedup. See the
+[benchmark conditions and results](benchmarks/V0_3_1_PERFORMANCE.md).
+
+### Interface and usability
+
+- Kept crop selections editable through modifier-key presses and ruler use. Camera navigation
+  clears the view-specific outline while preserving selected geometry.
+  Shrinking an outline deselects geometry outside it while retaining separately added regions.
+  Empty outlines remain editable, and clicking inside no longer implicitly adds the selection.
+- Enabled ruler picking through selection highlights without committing or dismissing the crop.
+- Added **Ctrl+double-click** to toggle a connected mesh component without changing other
+  selected components. Connected-component analysis runs in a background worker.
+- Simplified the selection panel to a compact row of Crop, Delete, Step back, and Clear actions.
+  Optimization remains in the toolbox. Added themed action icons and directional view icons.
+- Position the connected-selection panel near the click unless its position was moved manually.
+- Fixed repeated arrow-key rotation progressively moving the pivot and zooming into the mesh.
+  Continued rotation now preserves its pivot and camera distance.
+- Smoothed keyboard rotation, pan, zoom, and mouse-wheel navigation with short, bounded steps
+  and no accumulating motion backlog. Mouse dragging remains direct.
+- Clear ruler measurements when the camera rotates, while preserving selected geometry.
+- Increased toolbox section margins and protected button-row minimum sizes to prevent clipped
+  borders and labels across the supported font sizes.
+- Combined fullscreen, minimize, maximize/restore, and close controls into one themed titlebar row.
+- Changed the default fullscreen shortcut to **F11**, for both entering and leaving fullscreen.
+  The previous Ctrl+Enter default is migrated; other custom mappings are retained.
+- Added clearable Preferences search that filters individual setting rows by their names and
+  section headings. Matching labels and controls remain together; tooltips, dropdown values,
+  and shortcut values do not produce matches.
+- Matched metrics-graph backgrounds, grid lines, labels, and CPU/GPU traces to each application
+  theme without clearing recorded history.
+- Replaced the yellow General-section background in Dark Focus with a lighter dark blue.
+- Added visible vertical scrollbars to both changelog views and horizontal scrolling for wide
+  content. Improved link, text, code, table, and selection colors across themes.
+- Prevented delayed viewport layout refreshes from rendering after the window has closed.
+
+### Windows integration
+
+- Added per-user STL **Open with MeshMill** registration without changing the default STL handler.
+- Added installer registration and uninstall cleanup for MeshMill-owned association entries.
+
+### Validation
+
+- Expanded checks for unchanged geometry, CPU fallback, cancellation, selection optimization,
+  apply/undo/redo/reload, window-state transitions, shortcut migration, Preferences filtering,
+  theme contrast, changelog scrolling, and association install/update/removal behavior.
+
+## 0.3.0
 
 MeshMill 0.3.0 improves performance with dense geometry, adds a higher-quality GPU-guided
 reduction option, and refines the desktop workflow.

@@ -95,6 +95,8 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: |
+          python tools/normalize_package_timestamps.py dist/MeshMill
+          if ($LASTEXITCODE -ne 0) { throw "Package timestamp normalization failed" }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.version.outputs.version }}" "installer\MeshMill.iss"
           if ($LASTEXITCODE -ne 0) { throw "Installer build failed" }
 
@@ -145,30 +147,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          @"
-          ## Windows download
-
-          **Most users should download `MeshMill-${{ steps.version.outputs.version }}-windows-x64-setup.exe`.**
-
-          - **Installer:** normal Windows installation with Start menu and optional desktop shortcuts.
-            Upgrades preserve settings and shortcut choices; uninstall removes MeshMill preferences.
-          - **Depth Adaptive QEM:** its minimal CUDA runtime is included in both Windows packages.
-            It activates on compatible NVIDIA hardware without a separate download or system-wide
-            CUDA installation.
-          - **Portable ZIP:** no installation. Extract the complete ZIP, then run `MeshMill.exe`.
-          - **Sample STL:** optional large test geometry for experimenting with MeshMill.
-          - **SHA256SUMS.txt:** checksums for verifying downloads.
-
-          These packages are self-contained. Python, Node.js, and development dependencies are not required.
-
-          ## Localization status
-
-          MeshMill 0.2.0 is currently distributed in English. Updated translations were deferred
-          because the available translation, validation, and review work exceeded current resource
-          and processing capacity. Existing community translation files remain in the repository for
-          future completion, but they are not included in these packages because they have not passed
-          the 0.2.0 release validation gates.
-
-          Linux and macOS downloads are published separately as clearly labeled preview releases.
-          "@ | Set-Content release-notes.md -Encoding utf8
+          python tools/release_notes.py --version "${{ steps.version.outputs.version }}" --output release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw "Release notes generation failed" }
           gh release create "${{ github.ref_name }}" release/* --verify-tag --notes-file release-notes.md --title "MeshMill ${{ steps.version.outputs.version }} for Windows"

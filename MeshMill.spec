@@ -1,5 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
+import subprocess
+import sys
+
+# Build the observational adapter from the installed reduction core before freezing.
+subprocess.run([sys.executable, 'tools/build_qem_progress.py'], check=True)
 
 a = Analysis(
     ['meshmill.py'],
@@ -14,6 +19,15 @@ a = Analysis(
         ('CUDA_EXCEPTION.md', '.'),
         ('docs/OUT_OF_CORE.md', 'docs'),
         ('docs/GPU_OUT_OF_CORE.md', 'docs'),
+        ('benchmarks/V0_3_1_PERFORMANCE.md', 'benchmarks'),
+        ('docs/images/meshmill-shaded.png', 'docs/images'),
+        ('docs/images/meshmill-vertices.png', 'docs/images'),
+        ('docs/images/meshmill-wireframe.png', 'docs/images'),
+        ('docs/images/meshmill-density.png', 'docs/images'),
+        ('docs/images/meshmill-density-overview.png', 'docs/images'),
+        ('docs/images/meshmill-density-zoom.png', 'docs/images'),
+        ('docs/images/meshmill-crop-selection.png', 'docs/images'),
+        ('docs/images/meshmill-connected-selection.png', 'docs/images'),
         ('assets/meshmill-mark.svg', 'assets'),
         ('assets/meshmill-logo.svg', 'assets'),
         ('assets/support-profile.webp', 'assets'),

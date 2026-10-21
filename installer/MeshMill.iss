@@ -16,6 +16,11 @@
 #endif
 #define MyAppPublisher "MeshMill contributors"
 #define MyAppExeName "MeshMill.exe"
+#ifndef MySourceDir
+  #define MySourceDir "..\dist\MeshMill"
+#endif
+#define MyAssociationProgId MyAppName + ".STL"
+#define MyAssociationExeName MyAppName + ".exe"
 
 [Setup]
 AppId={#MyAppId}
@@ -45,6 +50,7 @@ SetupLogging=yes
 UsePreviousAppDir=yes
 UsePreviousGroup=yes
 UsePreviousTasks=yes
+ChangesAssociations=yes
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 VersionInfoVersion={#MyAppVersion}
@@ -75,7 +81,7 @@ Type: files; Name: "{app}\THIRD_PARTY_NOTICES.md"
 Type: files; Name: "{app}\CUDA_EXCEPTION.md"
 
 [Files]
-Source: "..\dist\MeshMill\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -86,13 +92,24 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 ; upgrade keeps it. A real uninstall removes it with the rest of the app.
 [Registry]
 Root: HKCU; Subkey: "{#MySettingsKey}"; Flags: uninsdeletekey
+; Advertise an optional handler and secondary verb, leaving the default STL handler alone.
+Root: HKCU; Subkey: "Software\Classes\{#MyAssociationProgId}"; ValueType: string; ValueData: "STL mesh"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\{#MyAssociationProgId}\DefaultIcon"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"",0"
+Root: HKCU; Subkey: "Software\Classes\{#MyAssociationProgId}\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+Root: HKCU; Subkey: "Software\Classes\.stl\OpenWithProgids"; ValueType: string; ValueName: "{#MyAssociationProgId}"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAssociationExeName}"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#MyAppName}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAssociationExeName}\SupportedTypes"; ValueType: string; ValueName: ".stl"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAssociationExeName}\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.stl\shell\{#MyAppName}"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Open with {#MyAppName}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.stl\shell\{#MyAppName}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\{#MyAppExeName}"",0"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.stl\shell\{#MyAppName}\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 Filename: "{app}\{#MyAppExeName}"; Parameters: "{code:GetReopenParameters}"; Flags: nowait; Check: ShouldReopen
 
 [UninstallDelete]
-Type: filesandordirs; Name: "{localappdata}\MeshMill"
+Type: filesandordirs; Name: "{localappdata}\{#MyAppName}"
 
 [Code]
 function GetReopenParameters(Param: String): String;
