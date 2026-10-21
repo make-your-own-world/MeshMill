@@ -255,7 +255,7 @@ if it is already fully selected. Other selected components are preserved.
 Triangles connected through shared vertices are included; disconnected geometry across a gap
 is excluded. This selects by mesh connectivity, rather than by proximity or visible outline.
 
-![Ctrl+double-click connected selection, with separate mesh geometry left unselected](docs/images/meshmill-connected-selection.png)
+![Full MeshMill window showing connected selection and ruler measurements, with separate geometry left unselected](docs/images/meshmill-connected-selection.png)
 
 Modifier keys do not dismiss the outline. Shift-click adds or removes ruler points while a selection
 is active. Camera rotation clears the ruler. Camera movement preserves the selected geometry but
