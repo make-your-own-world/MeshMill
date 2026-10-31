@@ -308,6 +308,16 @@ try {
         throw "Installation changed the default STL handler."
     }
     Write-Host "Installer install, upgrade, launch, and uninstall checks passed."
+ }
+catch {
+    Write-Host ("Installer validation failed: " + $_.Exception.Message)
+    foreach ($DiagnosticLog in @($InstallLog, $UpgradeLog)) {
+        if (Test-Path -LiteralPath $DiagnosticLog) {
+            Write-Host ("Installer log: " + [IO.Path]::GetFileName($DiagnosticLog))
+            Get-Content -LiteralPath $DiagnosticLog -Tail 30 | Write-Host
+        }
+    }
+    throw
 }
 finally {
     foreach ($Fixture in @($OrphanWorker, $UnrelatedWorker)) {
