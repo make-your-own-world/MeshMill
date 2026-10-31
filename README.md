@@ -3,10 +3,8 @@
 </p>
 
 <!-- localization-navigation:start -->
-> **0.3.3 localization status:** The current application and documentation release is English-only.
-> Updated translations were deferred because translation, structural validation, and review exceeded
-> the resources and processing capacity available for this release. The links below lead to older
-> community translation work and may not describe current features.
+> **Translations:** Sorry the translations are out of date. I've been working on them alongside this release, but getting reliable results has been a difficult process. I'm hoping to have that resolved soon. For now, the current interface and documentation are in English, and the older translations may not cover the latest features.
+> Native-speaker review and corrections are welcome.
 
 <p align="center">
   <a href="https://github.com/make-your-own-world/MeshMill/blob/main/README.md">English</a> ·
@@ -39,40 +37,53 @@
 </p>
 <!-- localization-navigation:end -->
 
-MeshMill is a focused desktop application for making oversized, dense, or difficult mesh geometry
-manageable. It provides fast inspection, density analysis, regional selection, cropping, deletion,
-and controlled mesh reduction without requiring an account or uploading geometry.
+MeshMill helps turn dense or incomplete meshes into geometry you can work with. Inspect density,
+select and reduce regions, complete missing surfaces, build fitted clamshells, correct a rotation
+axis, and export to your next tool. Processing stays on your computer, with no account or upload.
 
-GPU-accelerated OpenGL rendering keeps viewport navigation, hardware picking, density visualization,
-and interactive inspection responsive. That graphics support is included in the normal MeshMill
-package. **Depth + Density Adaptive QEM (GPU / Best)** asks the GPU to perform a different kind of
-work: CUDA surface and density measurement before boundary-preserving QEM assembly. The Windows
-packages include the minimal NVIDIA CUDA computation runtime inside MeshMill, without installing a
-system-wide toolkit or background service. The first compatible run prepares and caches GPU kernels for
-that machine; later meshes reuse the cache. Geometry work runs outside the interface so long operations
-do not block navigation or controls.
+The viewport, picking, and density display use GPU-accelerated OpenGL. The depth-guided reduction
+algorithms also use CUDA to measure surface shape and density before CPU-based QEM reduction.
+Windows packages include the CUDA runtime they need, rather than a system-wide toolkit.
+The first compatible run prepares and caches GPU kernels; later meshes reuse that cache.
 
-MeshMill works with meshes from 3D scanners, CAD and modeling exports, reconstruction pipelines,
-generated geometry, and other STL sources. It prepares geometry for downstream editors,
-manufacturing tools, and other mesh workflows. General-purpose modeling, sculpting, animation,
-materials, and scene creation are outside its scope.
+MeshMill works with scanner output, CAD and modeling exports, reconstructed surfaces, and generated
+meshes. It is intended for geometry preparation rather than general-purpose modeling, sculpting,
+animation, or materials.
 
-### 0.3.3 improvements
+### New in 0.4
 
-Loaded meshes become interactive while GPU initialization continues in the background. Standard
-views fit the mesh more closely, display modes preserve framing, and Reload Original restores the
-opening camera. Metrics history progressively compresses older readings. Preferences add opening-folder
-choices and optional automatic updates, both update checking and installation remain off by default.
-Startup recovery cleans up verified workers left behind by older MeshMill versions. See the
-[full changelog](CHANGELOG.md).
+0.4 adds three tools:
 
-### 0.3.1 improvements
+- **Solidify** completes missing scan surfaces, with a preview and checks before applying.
+- **Cast** makes an offset envelope or a hollow split clamshell around a shape, with a Blob or Box exterior.
+- **Axial calibration** uses surface probes to correct rotation center and tilt without reshaping the mesh.
 
-This maintenance release improves loading and result display, adds Ctrl+double-click connected
-selection, and smooths keyboard and wheel navigation. Matched full-scan tests measured **9% less
-launch-to-result time in Wireframe** and **13% less in Density**; warmed GPU density visualization
-was approximately **3.3× faster**. Reduction decisions are unchanged. See the
-[comparison conditions](benchmarks/V0_3_1_PERFORMANCE.md) and [full changelog](CHANGELOG.md).
+Navigation is smoother, and Draft/Balanced/Fine use more of the target slider. Open and export STL,
+COLLADA, GLB, OBJ, and PLY; compare formats or remember compact-save settings. Generated scripts
+can repeat applied Optimize, Solidify, and Cast steps without opening the GUI.
+
+See the [Solidify and Cast guide](docs/SOLIDIFY_AND_CAST.md),
+[axial calibration guide](docs/AXIAL_CALIBRATION.md), [format comparison](docs/EXPORT_FORMATS.md),
+[automation guide](docs/AUTOMATION.md), and [full changelog](CHANGELOG.md#040---unreleased).
+
+### How the new tools work
+
+**Solidify** uses the scanned surfaces to constrain which parts of a volume are inside or outside.
+It builds a closed boundary between them, filling missing areas while retaining measured surface
+detail. The method is described in [Surface-Preserving Solid Completion](https://github.com/make-your-own-world/rnd/tree/main/solid-completion).
+
+**Cast** measures the exterior shape, adds the chosen clearance, and removes that cavity from a
+Blob or Box body. Cutting the body and closing the cut faces produces separate clamshell halves.
+See [Hollow Split Clamshell Construction](https://github.com/make-your-own-world/rnd/tree/main/clamshell-construction) for the cavity and split construction.
+
+**Axial calibration** measures surface contact through a rotation and fits the repeating wobble.
+The fit provides corrections for the rotation center and tilt. See [Probe-Guided Axial Calibration](https://github.com/make-your-own-world/rnd/tree/main/axial-calibration).
+
+The existing [Depth + Density Adaptive QEM](https://github.com/make-your-own-world/rnd/tree/main/depth-density-adaptive-qem) method combines depth-probe measurements and density weighting to guide mesh
+reduction. It remains a separate reduction step that can be used before or after the new tools.
+The papers include formulas, results, implementation details, and sources.
+The [research acknowledgements](RESEARCH_ACKNOWLEDGEMENTS.md) credit the public work that informed
+the implementation and experiments, including approaches explored along the way.
 
 ## Download
 
@@ -81,36 +92,11 @@ development dependencies are not required.
 
 | System | Recommended download | Status |
 | --- | --- | --- |
-| **Windows x64** | **[Download the Windows installer](https://github.com/make-your-own-world/MeshMill/releases/download/v0.3.3/MeshMill-0.3.3-windows-x64-setup.exe)** | Supported release |
-| Windows x64, no installation | [Download the portable ZIP](https://github.com/make-your-own-world/MeshMill/releases/download/v0.3.3/MeshMill-0.3.3-windows-x64-portable.zip) | Supported release |
-| Linux x86-64 | [Download the Linux preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-linux-x86_64.tar.gz) | Early testing preview |
-| macOS Apple silicon | [Download the Apple silicon preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-macos-arm64.zip) | Early testing preview |
-| macOS Intel | [Download the Intel Mac preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-macos-x86_64.zip) | Early testing preview |
-
-### Explore the sample mesh
-
-The sample is an intentionally dense composite mesh with redundant layers and uneven point density.
-Use it to explore display modes, crop and regional tools, and compare reduction algorithms without
-a scanner.
-
-| File | Triangles | Download | Best for |
-| --- | ---: | --- | --- |
-| Quick sample | 249,999 | [`sample-scan.stl`](samples/sample-scan.stl) | Learning the controls and quick evaluation |
-| Full source sample | 4,126,315 | [Download the full sample STL](https://github.com/make-your-own-world/MeshMill/releases/download/v0.3.0/MeshMill-sample-scan-original.stl) | Dense geometry and large-mesh testing |
-
-The quick sample is included with the repository. The full source sample is also available through
-Git LFS for repository users. See [`samples/README.md`](samples/README.md) for provenance,
-dimensions, and checksums.
-
-### Published papers
-
-Research, formulas, benchmarks, and publication figures are available in the
-[Make Your Own World R&D repository](https://github.com/make-your-own-world/rnd):
-
-- [Depth Adaptive QEM](https://github.com/make-your-own-world/rnd/blob/main/depth-adaptive-qem/depth-adaptive-qem-v1.1.pdf)
-- [Density-Balanced QEM](https://github.com/make-your-own-world/rnd/blob/main/density-balanced-qem/density-balanced-qem-v1.0.pdf)
-- [Depth + Density Adaptive QEM](https://github.com/make-your-own-world/rnd/blob/main/depth-density-adaptive-qem/depth-density-adaptive-qem-v1.1.pdf)
-- [Boundary-Preserved Deterministic QEM](https://github.com/make-your-own-world/rnd/blob/main/boundary-preserved-deterministic-qem/boundary-preserved-deterministic-qem-v1.0.pdf)
+| **Windows x64** | **[Download the Windows installer](https://github.com/make-your-own-world/MeshMill/releases/download/v0.4.0/MeshMill-0.4.0-windows-x64-setup.exe)** | Supported release |
+| Windows x64, no installation | [Download the portable ZIP](https://github.com/make-your-own-world/MeshMill/releases/download/v0.4.0/MeshMill-0.4.0-windows-x64-portable.zip) | Supported release |
+| Linux x86-64 | [Download the Linux preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-linux-x86_64.tar.gz) | Older 0.2 testing preview |
+| macOS Apple silicon | [Download the Apple silicon preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-macos-arm64.zip) | Older 0.2 testing preview |
+| macOS Intel | [Download the Intel Mac preview](https://github.com/make-your-own-world/MeshMill/releases/download/v0.2.0-preview.2/MeshMill-0.2.0-preview.2-macos-x86_64.zip) | Older 0.2 testing preview |
 
 **Most Windows users should choose the Windows installer.** Use the portable ZIP only when you do
 not want MeshMill installed or do not have permission to install applications. The normal package
@@ -121,53 +107,134 @@ CUDA Runtime, NVRTC, and CuPy remain separately licensed components. See the
 [third-party notices](THIRD_PARTY_NOTICES.md) and the
 [CUDA interoperability exception](CUDA_EXCEPTION.md).
 
-Linux and macOS packages are unsigned early previews. They pass automated native builds and
-packaged smoke tests, but still need real-hardware testing. Read the
+The linked Linux and macOS packages are unsigned 0.2 previews and do not include the 0.4 features.
+They passed automated native builds and packaged smoke tests, but still need real-hardware testing. Read the
 [Linux and macOS preview notes](docs/PLATFORM_TESTING.md) before installing them.
 
 Windows SmartScreen or macOS Gatekeeper may warn about unsigned packages. Older versions and
 download checksums are available on [GitHub Releases](https://github.com/make-your-own-world/MeshMill/releases).
 
+
+### Explore the sample mesh
+
+The sample is an intentionally dense composite mesh with redundant layers and uneven point density.
+Use it to explore display modes, crop and regional tools, and compare reduction algorithms without
+a scanner.
+
+| File | Triangles | Download | Best for |
+| --- | ---: | --- | --- |
+| Quick sample | 249,999 | [`sample-scan.stl`](samples/sample-scan.stl) | Learning the controls and quick evaluation |
+| Full source sample | 4,126,315 | [Download the full sample STL](https://github.com/make-your-own-world/MeshMill/releases/download/v0.4.0/MeshMill-sample-scan-original.stl) | Dense geometry and large-mesh testing |
+
+The quick sample is included with the repository. The full source sample is also available through
+Git LFS for repository users. See [`samples/README.md`](samples/README.md) for provenance,
+dimensions, and checksums.
+
+### Published papers
+
+The [R&D repository](https://github.com/make-your-own-world/rnd) contains the mathematics,
+experiments, geometry figures, attribution, and reproduction material behind these workflows.
+
+| Paper | Focus |
+| --- | --- |
+| [Depth Adaptive QEM](https://github.com/make-your-own-world/rnd/tree/main/depth-adaptive-qem) | GPU depth-gauge measurements guiding QEM reduction. |
+| [Density-Balanced QEM](https://github.com/make-your-own-world/rnd/tree/main/density-balanced-qem) | Adapting reduction to uneven surface sampling. |
+| [Depth + Density Adaptive QEM](https://github.com/make-your-own-world/rnd/tree/main/depth-density-adaptive-qem) | Combining depth and density guidance. |
+| [Boundary-Preserved Deterministic QEM](https://github.com/make-your-own-world/rnd/tree/main/boundary-preserved-deterministic-qem) | Bounded-memory tiled reduction and streamed assembly. |
+| [Probe-Guided Axial Calibration](https://github.com/make-your-own-world/rnd/tree/main/axial-calibration) | Surface probes, runout measurement, and rigid axis correction. |
+| [Surface-Preserving Solid Completion](https://github.com/make-your-own-world/rnd/tree/main/solid-completion) | Closing missing surfaces while retaining measured facets. |
+| [Hollow Split Clamshell Construction](https://github.com/make-your-own-world/rnd/tree/main/clamshell-construction) | Clearance, cavity subtraction, and closed split halves. |
+
 ## Quick start
 
-1. Open an STL.
+1. Select **Open** and choose a supported mesh file.
 2. Inspect it in Shaded, Density, Wireframe, or Vertices display mode.
-3. Choose a quality level, algorithm, and target triangle count.
+3. Choose a quality level and algorithm; adjust the slider to change the derived triangle target.
 4. Select **Optimize** to calculate a result.
 5. Compare the original and optimized meshes, then select **Apply** to commit the pass.
-6. Select **Save current state** or press `Ctrl+S`.
+6. Select **Save current mesh** or press `Ctrl+S`, then choose the output format.
 
-MeshMill never starts optimization merely because a file or setting changed.
+For surface completion or fitted housings, use [Solidify or Cast](docs/SOLIDIFY_AND_CAST.md).
+The shared Actions section provides preview comparison, Apply, Cancel, Undo, Redo, and saving.
+
+Optimization starts when you select Optimize, not when you open a file or change a setting.
 
 ## Capabilities
 
-- Binary and ASCII STL input, binary STL output
-- Depth + Density Adaptive QEM (GPU / Best), Depth Adaptive QEM (GPU / Higher Quality), Fast QEM,
-  density-balanced,
-  shape-preserving, and topology-preserving reduction
-- A color-coded quality row comparing reduction, sampled error, dimensional drift, area change,
-  and non-manifold topology after optimization
-- GPU-adaptive physical probes and density weighting that remove supported scan-scale variation before QEM reduction
-- Per-application CUDA GPU selection for GPU-guided reduction on multi-GPU systems
-- GPU-accelerated OpenGL viewport, hardware picking, and density visualization
-- Native background geometry workers for mesh reduction
-- Shaded, density, wireframe, and vertex display modes
-- Automatic targets derived from geometry rather than a fixed triangle ceiling
-- Polygon selection with additive multi-region selection
-- Crop, delete, or optimize only the selected region
-- Cached original, previous, and current mesh comparison
-- Undo and redo for committed geometry changes
-- Dimension drift, reduction percentage, and estimated output size
-- Millimeter, centimeter, meter, inch, and foot display units
-- CPU, memory, GPU, and geometry-activity metrics
-- Bounded overview loading when a binary STL exceeds the configured memory budget
-- GUI and command-line applications
-- Local processing with no account, telemetry, upload, or cloud dependency
+- Whole-mesh and regional reduction with Fast QEM, Density-Balanced QEM, Depth Adaptive QEM,
+  Depth + Density Adaptive QEM, shape-preserving, and topology-preserving options.
+- Shaded, Density, Wireframe, and Vertices views, with GPU rendering and picking.
+- Polygon and connected-component selection, crop, delete, invert selection, and ruler measurements.
+- Solidify for whole meshes or selections, fitted casts, and separately exportable clamshell halves.
+- Probe-guided axis correction with runout and angular-coverage measurements.
+- Original, previous, and current comparisons, plus Undo/Redo for applied changes.
+- Measured surface error, dimensional drift, area change, topology, and reduction results.
+- Geometry-derived triangle targets and per-application CUDA device selection.
+- STL, COLLADA, GLB, OBJ, and PLY import/export, with optional flat-face merging for polygon formats.
+- CPU, RAM, GPU, VRAM, processing, and I/O metrics, including session geometry totals.
+- Bounded overview loading and tiled processing for large binary STL files.
+- GUI, command-line processing, and editable scripts for multi-step automation.
+- Millimeter, centimeter, meter, inch, and foot display units.
+- Local operation without an account, telemetry, or cloud dependency.
 
 The Performance settings list CUDA adapters by model, PCI address, and memory capacity. Selecting an
 adapter directs GPU-guided analysis to that device for whole-mesh and selection-only work. System
 selection favors the compatible device with the most available VRAM. The OpenGL viewport continues to
 use the graphics adapter chosen by the operating system.
+
+## Solidify, Cast, and export
+
+Actions holds Apply, Cancel, comparison, Undo/Redo, and saving.
+Solidify completes supported open surfaces. Cast creates an offset Envelope or a hollow Clamshell,
+with a fitted Blob or Box exterior and an adjustable split plane.
+
+The same incomplete scan before and after Solidify, shown from different angles. The result
+retains 99.90% of the measured surface and reports zero open edges. Rebuilt area is additional
+surface used to complete the solid.
+
+![Incomplete scan with missing surfaces](docs/images/meshmill-solidify-before.png)
+
+![Completed solid with measured surface-retention and boundary statistics](docs/images/meshmill-solidify-after.png)
+
+![Current MeshMill interface showing a fitted cavity](docs/images/meshmill-cast-workspace.png)
+
+Clearance, wall thickness, gap bridging, and sampling start from the mesh geometry and can be adjusted.
+Update the preview explicitly, inspect its fit, and replace the working mesh or export the result.
+See the [Solidify and Cast guide](docs/SOLIDIFY_AND_CAST.md).
+
+![Cast controls with adjustable clearance and wall thickness](docs/images/meshmill-cast-controls.png)
+
+Compare formats by strengths, tradeoffs, downstream application support, face count, and estimated
+size. Remember preferred options for compact saves, or select Compare formats to return to the
+full comparison. Coplanar merging is off by default and runs once when saving if selected; opening
+the dialog does not start geometry processing. See [opening and exporting geometry](docs/EXPORT_FORMATS.md).
+
+![Save As comparing COLLADA, GLB, PLY, OBJ, and STL](docs/images/meshmill-export-comparison.png)
+
+A generated cavity imported into SketchUp, followed by a Cura layer preview:
+
+![Cast geometry imported into SketchUp](docs/images/sketchup-import.png)
+
+![Cura layer preview of the generated cavity on the print bed](docs/images/cura-print-bed.png)
+
+## Calibrate a rotation axis
+
+Orient the model as you want to inspect it, then open **Axial calibration**. Choose an axis relative
+to the current view, place contact probes at different surface heights, and select **Rotate**.
+The probes measure the surface as it passes and adjust the rotation center and tilt.
+
+A subtle horizontal/vertical viewport cross provides the alignment reference. Lighter original
+axes show X/Y/Z degree offsets at both viewport edges. Adjust rotation, tilt, and alignment depth
+with the keyboard; Ctrl+Shift+Up/Down moves the alignment axis in and out. Rotation keeps the
+model fitted until you manually change zoom. Coverage and runout show the fit. Once detection reaches **Stable**, inspection continues without further
+fitting. Select **Finalize** to keep the alignment, clear the overlays, and return to Optimize.
+The mesh surface is unchanged. Finalized exports use the calibrated axis as Z and its center as
+the origin, consistently across formats and generated workflows.
+
+![Surface probes and axis correction around the scanned part](https://raw.githubusercontent.com/make-your-own-world/rnd/main/axial-calibration/figures/calibration-geometry.png)
+
+See the [axial calibration guide](docs/AXIAL_CALIBRATION.md) and
+[published mathematical report](https://github.com/make-your-own-world/rnd/tree/main/axial-calibration).
 
 ## Inspect geometry before reducing it
 
@@ -205,6 +272,13 @@ stays centered on the pointer and reveals local density without changing the mai
 
 ![MeshMill Density display with the viewport magnifier](docs/images/meshmill-density-zoom.png)
 
+### Operation progress
+
+A shared progress panel shows the current step, overall completion, elapsed time, and live resource
+metrics while geometry processing runs.
+
+![Geometry analysis with step progress and resource metrics](docs/images/meshmill-processing-progress.png)
+
 ## View controls
 
 | Input | Action |
@@ -214,9 +288,9 @@ stays centered on the pointer and reveals local density without changing the mai
 | Shift + middle-drag | Pan |
 | Mouse wheel | Zoom toward the pointer |
 | Ctrl + mouse wheel | Roll clockwise or counterclockwise |
-| Arrow keys | Orbit around the view center |
+| Arrow keys | Rotate around the model center |
 | Ctrl + arrow keys | Pan |
-| Ctrl + Shift + Up/Down | Zoom |
+| Ctrl + Shift + Up/Down | Zoom; move alignment depth while Axial calibration is active |
 | Ctrl + Shift + Left/Right | Roll |
 | `F1` / `F2` / `F3` / `F4` | Shaded / Density / Wireframe / Vertices |
 | Right mouse hold | Magnifier |
@@ -231,6 +305,7 @@ stays centered on the pointer and reveals local density without changing the mai
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
 | `Ctrl+S` | Save the current mesh state |
 | `F11` | Enter or leave fullscreen |
+| `Space` (Axial calibration active) | Start or stop calibration rotation |
 
 Standard view keys follow the six-key navigation block:
 
@@ -247,8 +322,10 @@ Saving a view also updates its opposite view. Left and Right, Front and Back, an
 remain paired. In the confirmation dialog, **Save** is the default action, so Enter saves the
 orientation. Front appears at the top of both Top and Bottom views.
 
-Shortcuts can be changed or reset in Settings. Keyboard and wheel navigation use short, bounded
-transitions without accumulating momentum. Repeated arrow rotation retains its pivot and zoom level.
+Shortcuts can be changed or reset in Settings. A single rotation-key press moves one degree;
+holding the key accelerates smoothly. Panning and zooming also start gently and respond continuously.
+Repeated rotation retains its pivot. During Axial calibration, automatic framing keeps the model fitted
+until manual zoom takes precedence.
 Preferences search filters setting names and section headings.
 
 ## Selection workflow
@@ -306,7 +383,7 @@ in [docs/UPDATES.md](docs/UPDATES.md).
 `MeshMillCLI.exe` is included in both release packages:
 
 ```powershell
-.\MeshMillCLI.exe "C:\path\mesh.stl" --preset balanced
+.\MeshMillCLI.exe "C:\path\mesh.stl" --quality balanced
 .\MeshMillCLI.exe "C:\path\mesh.stl" --quality fine
 .\MeshMillCLI.exe "C:\path\mesh.stl" --target 150000 --output "C:\path\mesh-reduced.stl"
 .\MeshMillCLI.exe "C:\path\mesh.stl" --algorithm depth-adaptive --target 150000
@@ -326,33 +403,17 @@ system-selected CUDA GPU by default. `--aggressiveness` accepts values from `0` 
 `10` (speed), with `7` as the default. Run `.\MeshMillCLI.exe --help` for all options. MeshMill
 refuses to overwrite its input file.
 
-After applying one or more full-mesh optimization passes in the desktop app, **Generate PowerShell
-script** appears above **Save current mesh**. It writes a non-interactive script that chains the
-committed passes through `MeshMillCLI.exe`, preserving their algorithm, target, GPU, and
-aggressiveness settings. Crop and selection edits are identified in the script but are not replayed.
+**Generate PowerShell script** replays committed Optimize, Solidify and Cast operations without
+opening the GUI. Reduction passes retain their algorithm, Draft/Balanced/Fine quality, GPU and
+processing settings. Each pass derives its target from its current input. Crops, selection edits
+and manually guided surfaces become an input-mesh checkpoint, followed by subsequent tool steps.
+The script is editable and accepts `-InputMesh`, `-OutputMesh` and `-CliPath` overrides.
 
-## Sample geometry
+Inputs and outputs support STL, COLLADA, GLB, OBJ and PLY. For an explicit multi-tool pipeline,
+use `--workflow workflow.json --output result.stl`. See [automation workflows](docs/AUTOMATION.md)
+for the file format, operation settings and examples.
 
-Two versions of the development sample are available. The sample is a composite mesh with
-intentional layers of redundant geometry and varied density. It gives people without a scanner a
-realistic fixture for comparing algorithms, inspecting density, exercising regional operations,
-and developing roadmap features. MeshMill does not require scanned input.
-
-| File | Triangles | Size | Delivery | Best for |
-| --- | ---: | ---: | --- | --- |
-| [`sample-scan.stl`](samples/sample-scan.stl) | 249,999 | 11.9 MiB | Normal Git | Quick evaluation, CI, and learning the controls |
-| [`original-scan.stl`](samples/original-scan.stl) | 4,126,315 | 196.8 MiB | Git LFS | Testing dense source geometry and large-mesh performance |
-
-The smaller sample is downloaded with every normal clone. The untouched original is optional and
-managed through Git LFS so it does not inflate ordinary repository history. GitHub Desktop includes
-Git LFS. Command-line users can install Git LFS and run:
-
-```powershell
-git lfs pull --include="samples/original-scan.stl"
-```
-
-Tagged releases also publish the original STL as a direct download for people who do not use Git.
-See [`samples/README.md`](samples/README.md) for provenance, dimensions, and checksums.
+## Algorithm reference
 
 Algorithm contributors should also read the
 [algorithm testing guide](docs/ALGORITHM_TESTING.md) before comparing or changing reduction

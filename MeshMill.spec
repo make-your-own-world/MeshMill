@@ -2,6 +2,7 @@
 import os
 import subprocess
 import sys
+from PyInstaller.utils.hooks import copy_metadata, collect_data_files, collect_dynamic_libs
 
 # Build the observational adapter from the installed reduction core before freezing.
 subprocess.run([sys.executable, 'tools/build_qem_progress.py'], check=True)
@@ -9,14 +10,31 @@ subprocess.run([sys.executable, 'tools/build_qem_progress.py'], check=True)
 a = Analysis(
     ['meshmill.py'],
     pathex=[],
-    binaries=[],
+    binaries=collect_dynamic_libs('warp'),
     datas=[
         ('LICENSE', '.'),
+        ('SOURCES.md', '.'),
+        ('RESEARCH_ACKNOWLEDGEMENTS.md', '.'),
+        ('licenses', 'licenses'),
         ('README.md', '.'),
         ('CHANGELOG.md', '.'),
         ('ROADMAP.md', '.'),
         ('THIRD_PARTY_NOTICES.md', '.'),
         ('CUDA_EXCEPTION.md', '.'),
+        ('docs/SOLIDIFY_AND_CAST.md', 'docs'),
+        ('docs/SOLIDIFY_CAST_MATH.md', 'docs'),
+        ('docs/images/meshmill-cast-workspace.png', 'docs/images'),
+        ('docs/images/meshmill-solidify-before.png', 'docs/images'),
+        ('docs/images/meshmill-solidify-after.png', 'docs/images'),
+        ('docs/images/meshmill-processing-progress.png', 'docs/images'),
+        ('docs/images/meshmill-cast-controls.png', 'docs/images'),
+        ('docs/images/meshmill-export-comparison.png', 'docs/images'),
+        ('docs/images/sketchup-import.png', 'docs/images'),
+        ('docs/images/cura-print-bed.png', 'docs/images'),
+        ('docs/EXPORT_FORMATS.md', 'docs'),
+        ('docs/AUTOMATION.md', 'docs'),
+        ('docs/AXIAL_CALIBRATION.md', 'docs'),
+        ('surface_distance_gpu.py', '.'),
         ('docs/OUT_OF_CORE.md', 'docs'),
         ('docs/GPU_OUT_OF_CORE.md', 'docs'),
         ('benchmarks/V0_3_1_PERFORMANCE.md', 'benchmarks'),
@@ -32,9 +50,12 @@ a = Analysis(
         ('assets/meshmill-logo.svg', 'assets'),
         ('assets/support-profile.webp', 'assets'),
         ('locales/en-US.json', 'locales'),
-    ],
+    ] + sum((copy_metadata(package) for package in ('pymeshfix', 'tetgen', 'PyMaxflow', 'python-sat', 'six', 'warp-lang')), []) + collect_data_files('warp', include_py_files=True, excludes=['tests/**', 'examples/**', 'benchmarks/**']),
     hiddenimports=[
         'unittest.mock',
+        'pysat.solvers',
+        'pysat.card',
+        'pysat.examples.rc2',
         'vtkmodules.vtkInteractionStyle',
         'vtkmodules.vtkRenderingOpenGL2',
         'vtkmodules.vtkRenderingFreeType',

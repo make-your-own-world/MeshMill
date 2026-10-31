@@ -12,6 +12,7 @@ import fast_simplification
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from benchmark_depth_density_adaptive import connected_arrays, load_binary_stl
+
 from depth_adaptive_qem import (
     _match_surface_area,
     _remove_nonmanifold_surplus,

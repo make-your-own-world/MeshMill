@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meshmill"
-version = "0.3.3"
-description = "A local desktop and command-line tool for inspecting and optimizing STL meshes."
+version = "0.4.0"
+description = "A local desktop and command-line tool for inspecting, reducing, repairing, and exporting mesh geometry."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "GPL-3.0-or-later"
@@ -27,13 +27,18 @@ dependencies = [
   "numpy==2.5.3",
   "PySide6==6.11.2",
   "vtk==9.7.1",
+  "pymeshfix==0.18.1",
+  "tetgen==0.8.4",
+  "PyMaxflow==1.3.2",
+  "python-sat==1.9.dev17",
+  "warp-lang==1.9.1",
 ]
 
 [project.scripts]
 meshmill = "meshmill:main"
 
 [tool.setuptools]
-py-modules = ["meshmill", "out_of_core", "gpu_resident", "depth_adaptive_qem", "qem_progress", "worker_lifecycle", "metrics_history"]
+py-modules = ["axis_datum", "lathe_axis", "lathe_contact", "lathe_control", "lathe_spindle", "orientation_layout", "clamshell_mold", "closed_reduction", "constrained_solid", "depth_adaptive_qem", "exposed_surface", "geometry_dimension_control", "geometry_workload", "gpu_resident", "imprint_cleanup", "imprint_gpu", "localization", "mesh_export", "mesh_export_ui", "mesh_formats", "mesh_workflow", "meshmill", "meshmill_version", "metrics_history", "out_of_core", "partial_scan_cavity", "qem_progress", "solidify", "solid_surface_prepare", "solidify_metrics", "surface_distance_gpu", "surface_repair", "surface_sheets", "surface_support_repair", "wall_thickness", "worker_lifecycle"]
 
 [tool.ruff]
 line-length = 100

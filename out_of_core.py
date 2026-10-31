@@ -741,10 +741,14 @@ def _optimize_tile(
     algorithm: str,
     gpu_preference: str,
 ) -> tuple[int, int, int, str]:
+    from geometry_workload import difference, record, snapshot
+    workload_before = snapshot()
     index_path = Path(index_directory)
     result_path = Path(run_directory) / f"tile-{tile_number:08d}.npz"
     points, faces = load_tile_mesh(index_path, tile)
+    record("CPU", points, faces)
     protected_vertices = boundary_vertex_mask(len(points), faces)
+    _report = {}
     if tile_target < len(faces):
         if algorithm.startswith("Depth + Density Adaptive QEM"):
             from depth_adaptive_qem import simplify_depth_density_adaptive_qem
@@ -784,6 +788,8 @@ def _optimize_tile(
             )
     else:
         output_points, output_faces = points, faces
+    if _report.get("backend") == "CUDA":
+        record("GPU", points, faces)
     if not 1 <= len(output_faces) <= tile.triangle_count:
         raise RuntimeError(
             f"Tile {tile_number} produced {len(output_faces):,} triangles from "
@@ -800,6 +806,9 @@ def _optimize_tile(
     _save_tile_result(result_path, output_points, output_faces)
     if not _tile_result_valid(result_path, tile.triangle_count):
         raise RuntimeError(f"Tile {tile_number} failed result validation.")
+    result_path.with_suffix(".workload.json").write_text(
+        json.dumps(difference(snapshot(), workload_before)), encoding="utf-8"
+    )
     return tile_number, tile.triangle_count, len(output_faces), os.fspath(result_path)
 
 
@@ -930,6 +939,7 @@ def optimize_indexed_mesh(
         )
         for tile_number, source_count, output_count, result_path in completed_results:
             _cancelled(cancel_event)
+            Path(result_path).with_suffix(".workload.json").unlink(missing_ok=True)
             results_by_tile[tile_number] = (Path(result_path), output_count)
             processed += source_count
             checkpoint()
@@ -953,6 +963,11 @@ def optimize_indexed_mesh(
             for future in completed_futures(futures, lambda: _cancelled(cancel_event)):
                 _cancelled(cancel_event)
                 tile_number, source_count, output_count, result_path = future.result()
+                from geometry_workload import merge
+                receipt_path = Path(result_path).with_suffix(".workload.json")
+                if receipt_path.exists():
+                    merge(json.loads(receipt_path.read_text(encoding="utf-8")))
+                    receipt_path.unlink()
                 results_by_tile[tile_number] = (Path(result_path), output_count)
                 processed += source_count
                 checkpoint()

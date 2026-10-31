@@ -33,3 +33,6 @@ orientation-*.jsonl
 /tools/localization/prepare_queue.py
 /tools/localization/finish_and_validate.py
 /tools/normalize_math_markdown.py
+
+# Generated TetGen diagnostics
+/tetgen-tmpfile*

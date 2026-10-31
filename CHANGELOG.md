@@ -2,6 +2,95 @@
 
 Published releases are listed newest first. Preview builds are marked separately.
 
+## 0.4.0 - 2026-10-30
+
+### Performance and navigation
+
+- Rotation, panning, and zooming are smoother. A rotation-key tap moves one degree; holding a key gradually increases the speed.
+- Alignment movement draws once per navigation frame instead of drawing the same update twice.
+- The orientation cube builds its mesh miniature in the background. Undo/Redo keeps the complete mesh visible and preserves its framing.
+- Surface analysis, probing, and repair run outside the interface where supported. Cast reuses surface analysis when the geometry and settings still match.
+- Multi-pass automation keeps full-precision geometry in memory between whole-mesh steps.
+
+### Solidify
+
+Complete missing scan surfaces on a whole mesh or selected regions, then inspect the result before applying it.
+
+- Retains measured surfaces while closing missing volume. The controls report how much surface was kept, how much was rebuilt, and how many open edges remain.
+- Checks the result for open boundaries, non-manifold geometry, and intersecting surfaces. Failed completion produces an error rather than silently applying an unchanged mesh.
+- Supports Original/Previous comparisons, Cancel, Apply, and Undo/Redo.
+- Keeps closed-solid checks when reducing the completed result.
+
+### Cast: envelopes and split clamshells
+
+- Creates an offset Envelope or a hollow Clamshell around the scanned shape. Clamshell is the default, with 0.5 mm clearance.
+- Offers a fitted Blob exterior or a Box exterior. Sampling, wall thickness, and gap bridging start from geometry-derived values and can be adjusted.
+- Detects exterior surfaces and wall thickness. Surface hints let you guide ambiguous or incomplete areas; Solidify prepares open geometry when needed.
+- Shows the cast over the source, with opacity and visibility controls. Preview updates run when requested.
+- Splits along X, Y, Z, the current view, or a movable and rotatable custom plane. Halves remain separate connected parts and can be displayed apart or exported separately.
+- A cast can replace the working mesh for further selection, measurement, reduction, or export.
+- Supported surface probing uses the selected GPU, with progress and cancellation.
+
+### Axial calibration
+
+Use surface-contact probes to correct the rotation center and tilt without changing the mesh's shape.
+
+- Starts from the current view, with vertical, horizontal, and in/out rotation modes.
+- Probes can be added at several surface positions, dragged, or removed by double-clicking. A click without dragging keeps the existing contact.
+- Fits the axis against the probes and checks proposed corrections before accepting them.
+- Shows a faint viewport X/Y reference cross and all three original-axis degree offsets. Lines reach the viewport edges; offset labels appear at both ends and stay on-screen.
+- Draws the reference cross at its actual depth relative to the mesh. Ctrl+Shift+Up/Down moves the alignment axis closer or farther.
+- Adjusts framing during alignment rotation until you manually change zoom. Navigation outside alignment keeps its existing behavior.
+- Reports runout, correction values, and full-turn coverage. Detecting, Adjusting, Validating, and Stable describe the current stage.
+- Continues rotating after fitting settles, with probe graphics cleared for inspection. More probes can be added to refine the fit.
+- Space starts or stops rotation. Reverse, Clear probes, and Reset provide the other alignment controls.
+- Finalize keeps the correction, clears the overlays, and returns to Optimize. Exports and generated workflows use the corrected axis as Z and its center as the origin.
+
+### Open and export
+
+- Opens and exports STL, COLLADA, GLB, OBJ, and PLY, including previews and separate cast halves. Supported imports apply the file's declared units and scene transforms.
+- The themed Save As comparison explains format tradeoffs and application support, with links to the applications' websites.
+- Remembering a format and its options switches to a compact save dialog. Compare formats restores the full view without losing the filename, folder, or options.
+- The dialog shows mesh counts and available size estimates without processing the geometry first. Coplanar merging is off by default and runs once on Save when selected.
+- Polygon export merges eligible flat triangles while retaining curves, openings, and shared boundary vertices. COLLADA export preserves fine face detail when imported into SketchUp.
+- Output filenames use the current triangle count. Exports are written to a temporary file before replacing an existing output; the opened source is protected from overwriting.
+
+### Actions, controls, and metrics
+
+- Apply, Cancel, Undo, Redo, comparison, display mode, and saving share the Actions section. Controls appear when there is something to act on.
+- Opening a tool collapses the others, moves the active tool up, and scrolls to it. Toolbox order can be changed in Preferences.
+- Targets, estimates, and result statistics follow the current mesh after cropping, casting, solidifying, or using history.
+- Draft, Balanced, and Fine sit at about 30%, 60%, and 90% of the slider. Their geometry-derived triangle targets are unchanged, with room to adjust beyond the presets.
+- Adds Invert selection and an optional recent-files button beside Open. Recent-file history is off by default and can be cleared in Preferences.
+- The orientation cube contains a miniature of the current mesh. Its faces distinguish positive and negative directions, and smaller X/Y/Z badges show rotation values.
+- Reverses Up/Down and Left/Right arrow rotation and Ctrl+arrow panning. Ctrl+Shift roll and alignment-depth controls retain their directions.
+- Uses consistent theme colors, scrollbars, section icons, button sizes, and split-plane controls. Dialog title bars match the theme, with a different shade for inactive windows.
+- GPU metrics include viewport rendering activity as well as geometry processing. Rendering and CUDA devices are identified separately, and NVIDIA readings are collected asynchronously with a fallback.
+- Session totals count vertices, triangles, and geometry-array bytes processed on CPU and GPU, including previews. GPU and VRAM bars match the green GPU history trace; CPU and RAM use blue.
+- Operation titles describe the work; resource metrics show CPU and GPU activity separately.
+
+### Headless automation and generated scripts
+
+- Generates editable PowerShell scripts for applied Optimize, Solidify, and Cast steps, in order. Scripts preserve algorithm, quality, device, worker, processing, and tool settings.
+- Each reduction pass derives its Draft/Balanced/Fine target from that pass's input. Crops, selections, and manually guided surfaces are carried through input-mesh checkpoints.
+- Versioned JSON workflows run through `--workflow`, including format conversion and tiled reduction. CLI output supports all five mesh formats.
+- Scripts accept input, output, and executable overrides, protect the source file, stop on errors, and clean up temporary jobs. Undo/Redo restores the recorded workflow steps too.
+
+### Papers
+
+Three reports explain the methods added in 0.4, with formulas, symbol definitions, examples, results, sources, and reproduction material:
+
+- [Probe-Guided Axial Calibration](https://github.com/make-your-own-world/rnd/tree/main/axial-calibration): fits repeating surface-contact wobble over a rotation to correct the axis center and tilt.
+- [Surface-Preserving Solid Completion](https://github.com/make-your-own-world/rnd/tree/main/solid-completion): uses measured surfaces to constrain inside/outside volume labels, then extracts a closed boundary to complete missing areas.
+- [Hollow Split Clamshell Construction](https://github.com/make-your-own-world/rnd/tree/main/clamshell-construction): constructs a clearance cavity inside an outer body, then cuts and closes separate clamshell halves.
+
+The [research acknowledgements](RESEARCH_ACKNOWLEDGEMENTS.md) credit the public research and
+open-source work behind the methods, experiments, and comparisons.
+
+### Languages
+
+Sorry the translations are out of date. I've been working on them alongside this release, but getting reliable results has been a difficult process. I'm hoping to have that resolved soon. For now, the current interface and documentation are in English, and the older translations may not cover the latest features. Native-speaker review and corrections are welcome.
+
 ## 0.3.3 - 2026-10-21
 
 ### Loading and optimization preparation

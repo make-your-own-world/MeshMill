@@ -68,20 +68,20 @@ boundaries, topology, or local surface proximity matters most.
 These results use the same full fixture and approximately the same target when the prototype could
 reach it.
 
-| Prototype | Compute time | Triangles | Max drift | RMS | P95 | Area ratio | Boundary | Non-manifold | Decision |
+| Prototype | Compute time | Triangles | Max drift | RMS | P95 | Area ratio | Boundary | Non-manifold | Observation on this fixture |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| GPU voxel clustering | 0.771 s | 243,813 | 0.8465 mm | 0.8105 mm | 1.2489 mm | 0.98079 | 9,614 | 3,297 | Rejected: merges nearby unrelated sheets |
-| GPU quadric clustering | 2.173 s | 243,813 | 0.0656 mm | 1.0991 mm | 1.8288 mm | 1.44145 | 9,614 | 3,297 | Rejected: severe folded-area growth |
-| GPU conservative QEM | 66.936 s | 722,687 | 0.3953 mm | 1.5368 mm | 3.2350 mm | 1.01143 | 14,215 | 0 | Rejected: slow and stalls above target |
-| GPU parallel QEM | 25.282 s | 706,682 | 0.6213 mm | 1.5313 mm | 3.2820 mm | 1.01092 | 14,533 | 170 | Rejected: topology damage and stalls |
-| Complete GPU QEM | 19.486 s | 249,999 | 0.0538 mm | 2.6929 mm | 5.9292 mm | 1.00655 | 14,215 | 0 | Rejected: slower and less accurate than CPU |
+| GPU voxel clustering | 0.771 s | 243,813 | 0.8465 mm | 0.8105 mm | 1.2489 mm | 0.98079 | 9,614 | 3,297 | Nearby surface sheets merged |
+| GPU quadric clustering | 2.173 s | 243,813 | 0.0656 mm | 1.0991 mm | 1.8288 mm | 1.44145 | 9,614 | 3,297 | Folded-area growth increased the measured area |
+| GPU conservative QEM | 66.936 s | 722,687 | 0.3953 mm | 1.5368 mm | 3.2350 mm | 1.01143 | 14,215 | 0 | Stopped above target after 66.936 s |
+| GPU parallel QEM | 25.282 s | 706,682 | 0.6213 mm | 1.5313 mm | 3.2820 mm | 1.01092 | 14,533 | 170 | Stopped above target with topology changes |
+| Complete GPU QEM | 19.486 s | 249,999 | 0.0538 mm | 2.6929 mm | 5.9292 mm | 1.00655 | 14,215 | 0 | Higher compute time and sampled error than the CPU baseline |
 | Depth-gauge surface sheets | 2.581 s | 224,730 | 0.0000 mm | 1.2139 mm | 2.1807 mm | n/a | n/a | n/a | Incomplete: output is six overlapping open sheets |
-| GPU trajectory normals + VTK QEM | 65.339 s resident compute | 250,000 | 0.0466 mm | 1.3385 mm | 2.6944 mm | 1.00065 | 14,223 | 43 | Rejected: slower and less accurate than Shape preserving |
+| GPU trajectory normals + VTK QEM | 65.339 s resident compute | 250,000 | 0.0466 mm | 1.3385 mm | 2.6944 mm | 1.00065 | 14,223 | 43 | Higher compute time and sampled error than Shape preserving |
 | GPU trajectory projection + Fast QEM | 12.526 s resident compute | 249,999 | 0.0177 mm | 1.1208 mm | 2.1526 mm | 1.00068 | 14,215 | 46 | Candidate: assembled output and best sampled distance |
 | Adaptive physical probes + Fast QEM | 12.673 s resident compute | 249,999 | 0.0205 mm | 1.2348 mm | 2.5292 mm | 1.00107 | 14,215 | 41 | Architecture retained; projection result needs refinement |
 | Depth Adaptive QEM, aggressiveness 8 | **10.156 s median resident** | 249,999 | 0.0234 mm | **1.0668 mm** | **2.0586 mm** | 1.00124 | 14,215 | Production GPU / Faster option |
-| Adaptive probe scalar + VTK QEM | 61.096 s resident compute | 250,000 | 0.1236 mm | 1.2591 mm | 2.4558 mm | 1.00150 | 13,626 | 30 | Rejected: scalar magnitude is not a local quota |
-| Probe partitions + weld + global QEM | 26.536 s resident compute | 250,000 | 0.0176 mm | 1.7353 mm | 3.4573 mm | 1.00182 | 14,242 | 35 | Rejected: pinned interfaces damage collapse ordering |
+| Adaptive probe scalar + VTK QEM | 61.096 s resident compute | 250,000 | 0.1236 mm | 1.2591 mm | 2.4558 mm | 1.00150 | 13,626 | 30 | Scalar magnitude did not control the local triangle budget |
+| Probe partitions + weld + global QEM | 26.536 s resident compute | 250,000 | 0.0176 mm | 1.7353 mm | 3.4573 mm | 1.00182 | 14,242 | 35 | Pinned interfaces constrained collapse ordering |
 
 The complete GPU QEM compute time excludes 11.706 seconds spent constructing mutable connectivity.
 Even under that favorable accounting, it did not beat the packaged Fast QEM wall time and its

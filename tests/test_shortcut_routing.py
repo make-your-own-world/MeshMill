@@ -63,6 +63,9 @@ class DummyWindow:
         )
         self.calls.append(f"{mode}-{direction}")
 
+    def _stop_keyboard_navigation(self):
+        pass
+
     def _set_display_shortcut(self, mode):
         self.calls.append(f"display-{mode}")
 
@@ -164,7 +167,7 @@ repeat = QKeyEvent(
     1,
 )
 assert meshmill.MainWindow.eventFilter(window, None, repeat) is True
-assert window.calls.pop() == "orbit-left"
+assert window.calls == []  # Held navigation is driven by its timer, not OS key repeats.
 
 window.selection_count = 0
 press = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier)

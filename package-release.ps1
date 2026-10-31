@@ -53,7 +53,7 @@ if (-not $Repackage) {
 
 # Refresh legal and release documentation without requiring an application rebuild.
 $BundledDataRoot = Join-Path $ProjectRoot "dist\MeshMill\_internal"
-@("LICENSE", "README.md", "ROADMAP.md", "THIRD_PARTY_NOTICES.md", "CUDA_EXCEPTION.md") |
+@("LICENSE", "README.md", "CHANGELOG.md", "ROADMAP.md", "THIRD_PARTY_NOTICES.md", "CUDA_EXCEPTION.md") |
     ForEach-Object {
         Copy-Item -LiteralPath (Join-Path $ProjectRoot $_) -Destination (Join-Path $BundledDataRoot $_) -Force
     }
@@ -77,6 +77,9 @@ Get-ChildItem -LiteralPath $ReleaseDirectory -File |
         $_.Name -eq 'SHA256SUMS.txt'
     } |
     Remove-Item -Force
+$PackageTime = [DateTime]::UtcNow
+Get-ChildItem -LiteralPath (Join-Path $ProjectRoot "dist\MeshMill") -Recurse -File |
+    ForEach-Object { $_.LastWriteTimeUtc = $PackageTime }
 & $Compiler "/DMyAppVersion=$Version" (Join-Path $ProjectRoot "installer\MeshMill.iss")
 if ($LASTEXITCODE -ne 0) {
     throw "Installer build failed."

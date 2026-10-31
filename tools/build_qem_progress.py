@@ -2,8 +2,9 @@
 
 The dependency itself is left untouched. Generated sources stay under build/.
 """
-from pathlib import Path
 import os
+from pathlib import Path
+
 import fast_simplification
 from setuptools import Extension, setup
 

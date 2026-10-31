@@ -71,6 +71,7 @@ from PySide6.QtGui import (
     QTextTable,
 )
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QBoxLayout,
     QCheckBox,
@@ -78,6 +79,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -87,7 +89,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QLayout,
     QLineEdit,
+    QListWidget,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -97,6 +101,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QTextBrowser,
+    QToolButton,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -305,85 +310,67 @@ def _powershell_literal(value: str | Path) -> str:
     return "'" + os.fspath(value).replace("'", "''") + "'"
 
 
-def render_optimization_script(
-    source_path: Path,
-    passes: list[dict[str, object]],
-    omitted_edits: list[str] | tuple[str, ...] = (),
-) -> str:
-    """Create a self-contained, non-interactive PowerShell optimization pipeline."""
-    if not passes:
-        raise ValueError("At least one full-mesh optimization pass is required")
-
-    source = source_path.resolve()
-    default_output = source.with_name(f"{source.stem}_optimized.stl")
-    notes = ""
+def render_optimization_script(source_path, passes, omitted_edits=()):
+    """Render an editable, headless workflow with culture-independent settings."""
+    steps = [dict(step) for step in passes] or [{"kind": "convert"}]
+    for step in steps:
+        step.pop("target", None)
+        if step.get("kind", "optimize") == "optimize":
+            step["quality"] = str(step.get("quality", "balanced")).lower()
+    source = Path(source_path).resolve()
+    cli_name = 'MeshMillCLI.exe' if os.name == 'nt' else 'MeshMillCLI'
+    cli = Path(sys.executable).with_name(cli_name)
+    prefix = []
+    runtime_paths = []
+    if not getattr(sys, "frozen", False):
+        import importlib.util
+        cli = Path(sys.executable)
+        if cli.stem.lower() == 'pythonw':
+            cli = cli.with_name('python.exe')
+        prefix = [os.fspath(Path(__file__).resolve()), "--cli"]
+        for package in ('pymeshfix', 'maxflow', 'tetgen', 'pysat', 'warp'):
+            dependency = importlib.util.find_spec(package)
+            if dependency is not None and dependency.submodule_search_locations:
+                location = os.fspath(Path(next(iter(dependency.submodule_search_locations))).parent)
+                if location not in runtime_paths:
+                    runtime_paths.append(location)
+    document = json.dumps({"version": 1, "steps": steps}, ensure_ascii=True, allow_nan=False)
+    lines = [
+        "[CmdletBinding()]", "param(",
+        f"    [string]$InputMesh = {_powershell_literal(source)},",
+        f"    [string]$OutputMesh = {_powershell_literal(source.with_name(source.stem + '_processed.stl'))},",
+        f"    [string]$CliPath = {_powershell_literal(cli)}", ")", "",
+        "$ErrorActionPreference = 'Stop'",
+        "$InputMesh = [IO.Path]::GetFullPath($InputMesh)",
+        "$OutputMesh = [IO.Path]::GetFullPath($OutputMesh)",
+        "if (-not (Test-Path -LiteralPath $InputMesh -PathType Leaf)) { throw 'Input mesh not found.' }",
+        "if ([String]::Equals($InputMesh, $OutputMesh, [StringComparison]::OrdinalIgnoreCase)) { throw 'Output must differ from input.' }",
+        "if (Test-Path -LiteralPath $OutputMesh) { throw 'Output already exists.' }",
+        "if (-not (Test-Path -LiteralPath $CliPath -PathType Leaf)) {",
+        f"    $beside = Join-Path $PSScriptRoot {_powershell_literal(cli_name)}",
+        "    if (Test-Path -LiteralPath $beside -PathType Leaf) { $CliPath = $beside }",
+        f"    else {{ $CliPath = (Get-Command {_powershell_literal(cli_name)} -ErrorAction Stop).Source }}", "}",
+        "$prefixArguments = @(" + ', '.join(_powershell_literal(x) for x in prefix) + ")",
+        "if ([IO.Path]::GetFileName($CliPath) -in @('MeshMillCLI.exe', 'MeshMillCLI')) { $prefixArguments = @() }",
+        f"$workflowJson = {_powershell_literal(document)}",
+        "$runtimeSearchPaths = @(" + ', '.join(_powershell_literal(x) for x in runtime_paths) + ")",
+        "$previousPythonPath = $env:PYTHONPATH",
+        "$jobFile = Join-Path ([IO.Path]::GetTempPath()) ('meshmill-' + [Guid]::NewGuid().ToString('N') + '.json')",
+        "try {",
+        "    if ($prefixArguments.Count -gt 0 -and $runtimeSearchPaths.Count -gt 0) {",
+        "        $env:PYTHONPATH = (@($runtimeSearchPaths) + @($previousPythonPath) | Where-Object { $_ }) -join [IO.Path]::PathSeparator",
+        "    }",
+        "    [IO.File]::WriteAllText($jobFile, $workflowJson, (New-Object Text.UTF8Encoding($false)))",
+        "    $cliArguments = @($InputMesh, '--workflow', $jobFile, '--output', $OutputMesh)",
+        "    & $CliPath @prefixArguments @cliArguments",
+        "    if ($LASTEXITCODE -ne 0) { throw ('MeshMill failed, exit code ' + $LASTEXITCODE) }",
+        "    if (-not (Test-Path -LiteralPath $OutputMesh -PathType Leaf)) { throw 'MeshMill did not create the output.' }",
+        "} finally {", "    $env:PYTHONPATH = $previousPythonPath",
+        "    Remove-Item -LiteralPath $jobFile -ErrorAction SilentlyContinue", "}", "",
+    ]
     if omitted_edits:
-        edits = ", ".join(dict.fromkeys(omitted_edits))
-        notes = (
-            "# The current UI state also includes edits that cannot be expressed by the CLI: "
-            f"{edits}.\n"
-            "# This script recreates only the committed full-mesh optimization passes.\n"
-        )
-
-    pass_lines = []
-    for index, optimization_pass in enumerate(passes, start=1):
-        algorithm = str(optimization_pass["algorithm"])
-        quality = str(optimization_pass.get("quality", "Balanced")).strip().lower()
-        if quality not in {"draft", "balanced", "fine"}:
-            quality = "balanced"
-        aggressiveness = float(optimization_pass.get("aggressiveness", 7.0))
-        gpu = str(optimization_pass.get("gpu", "system"))
-        pass_lines.extend(
-            (
-                "    @{",
-                f"        Name = 'Pass {index}'",
-                f"        Algorithm = {_powershell_literal(algorithm)}",
-                f"        Quality = {_powershell_literal(quality)}",
-                f"        Aggressiveness = {aggressiveness:g}",
-                f"        Gpu = {_powershell_literal(gpu)}",
-                "    },",
-            )
-        )
-
-    return "\n".join(
-        (
-            "# Generated by MeshMill. This script runs without opening the MeshMill UI.",
-            "# Review or change InputMesh and OutputMesh before running it.",
-            notes.rstrip(),
-            "[CmdletBinding()]",
-            "param(",
-            f"    [string]$InputMesh = {_powershell_literal(source)},",
-            f"    [string]$OutputMesh = {_powershell_literal(default_output)}",
-            ")",
-            "",
-            "$ErrorActionPreference = 'Stop'",
-            "$cli = Join-Path $PSScriptRoot 'MeshMillCLI.exe'",
-            "if (-not (Test-Path -LiteralPath $cli)) { $cli = 'MeshMillCLI.exe' }",
-            "if (-not (Test-Path -LiteralPath $InputMesh)) { throw \"Input mesh was not found: $InputMesh\" }",
-            "if (Test-Path -LiteralPath $OutputMesh) { throw \"Output already exists: $OutputMesh\" }",
-            "",
-            "$passes = @(",
-            *pass_lines,
-            ")",
-            "$runDirectory = Join-Path ([System.IO.Path]::GetDirectoryName($OutputMesh)) (\"MeshMill-run-\" + (Get-Date -Format 'yyyyMMdd-HHmmss'))",
-            "New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null",
-            "$currentMesh = $InputMesh",
-            "",
-            "for ($index = 0; $index -lt $passes.Count; $index++) {",
-            "    $pass = $passes[$index]",
-            "    $isLast = $index -eq ($passes.Count - 1)",
-            "    $nextMesh = if ($isLast) { $OutputMesh } else { Join-Path $runDirectory (\"pass-{0:D2}.stl\" -f ($index + 1)) }",
-            "    $arguments = @($currentMesh, '--algorithm', $pass.Algorithm, '--quality', $pass.Quality, '--aggressiveness', $pass.Aggressiveness, '--gpu', $pass.Gpu, '--output', $nextMesh)",
-            "    Write-Host (\"{0}: {1} ({2})\" -f $pass.Name, $pass.Algorithm, $pass.Quality)",
-            "    & $cli @arguments",
-            "    if ($LASTEXITCODE -ne 0) { throw \"MeshMillCLI failed during $($pass.Name).\" }",
-            "    $currentMesh = $nextMesh",
-            "}",
-            "",
-            "Write-Host \"Saved optimized mesh: $OutputMesh\"",
-            "",
-        )
-    )
+        lines.insert(0, '# InputMesh is an edited-mesh checkpoint. Camera and selection gestures are not replayed.')
+    return "\n".join(lines)
 
 
 def resource_path(relative: str) -> Path:
@@ -393,24 +380,25 @@ def resource_path(relative: str) -> Path:
 
 def localize_widget_tree(root: QWidget) -> None:
     """Apply the active catalog to static widget labels and tooltips."""
+    def refresh(widget, field, current, setter):
+        if not current:
+            return
+        source_key = f"i18n_{field}"
+        rendered_key = f"i18n_rendered_{field}"
+        source = widget.property(source_key)
+        if source is None or current != widget.property(rendered_key):
+            source = current
+        rendered = tr(str(source))
+        widget.setProperty(source_key, source)
+        widget.setProperty(rendered_key, rendered)
+        setter(rendered)
+
     widgets = [root, *root.findChildren(QWidget)]
     for widget in widgets:
-        title = widget.windowTitle()
-        if title:
-            source = widget.property("i18n_window_title") or title
-            widget.setProperty("i18n_window_title", source)
-            widget.setWindowTitle(tr(str(source)))
-        tooltip = widget.toolTip()
-        if tooltip:
-            source = widget.property("i18n_tooltip") or tooltip
-            widget.setProperty("i18n_tooltip", source)
-            widget.setToolTip(tr(str(source)))
+        refresh(widget, "window_title", widget.windowTitle(), widget.setWindowTitle)
+        refresh(widget, "tooltip", widget.toolTip(), widget.setToolTip)
         if isinstance(widget, (QLabel, QPushButton, QCheckBox)):
-            text = widget.text()
-            if text:
-                source = widget.property("i18n_text") or text
-                widget.setProperty("i18n_text", source)
-                widget.setText(tr(str(source)))
+            refresh(widget, "text", widget.text(), widget.setText)
     direction = locale_manager.manifest.get("languages", {}).get(
         locale_manager.locale, {}
     ).get("direction", "ltr")
@@ -420,6 +408,9 @@ def localize_widget_tree(root: QWidget) -> None:
 
 
 DEFAULT_APPEARANCE = "MeshMill Blue"
+TOOLBOX_ORDER = ("Actions", "Active tool", "Stats", "Other tools", "General")
+
+
 APPEARANCE_THEMES = {
     "MeshMill Blue": {
         "window": "#F4F8FC", "panel": "#FFFFFF", "surface": "#FBFDFF",
@@ -468,6 +459,13 @@ APPEARANCE_THEMES = {
 }
 
 
+def inactive_caption_color(theme: dict[str, str]) -> str:
+    base, border = QColor(theme["window"]), QColor(theme["border"])
+    return QColor(*(round(.8 * a + .2 * b) for a, b in zip(
+        base.getRgb()[:3], border.getRgb()[:3]
+    ))).name()
+
+
 def appearance_theme(name: str) -> dict[str, str]:
     return APPEARANCE_THEMES.get(name, APPEARANCE_THEMES[DEFAULT_APPEARANCE])
 
@@ -480,6 +478,20 @@ def selected_control_text(theme: dict[str, str]) -> str:
     return "#FFFFFF" if luminance < .179 else "#000000"
 
 
+def scrollbar_stylesheet(theme: dict[str, str]) -> str:
+    return "\n".join((
+        f"QScrollBar {{ background: {theme['surface']}; margin: 2px; border: 1px solid {theme['border']}; border-radius: 8px; }}",
+        "QScrollBar:vertical { width: 22px; } QScrollBar:horizontal { height: 22px; }",
+        f"QScrollBar::handle {{ background: {theme['muted']}; margin: 2px; border-radius: 6px; }}",
+        "QScrollBar::handle:vertical { min-height: 52px; } QScrollBar::handle:horizontal { min-width: 52px; }",
+        f"QScrollBar::handle:hover, QScrollBar::handle:pressed {{ background: {theme['accent']}; }}",
+        f"QScrollBar::handle:disabled {{ background: {theme['border']}; }}",
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }",
+        "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }",
+        "QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }",
+    ))
+
+
 def app_stylesheet(name: str = DEFAULT_APPEARANCE, font_size: int = 12) -> str:
     theme = appearance_theme(name)
     compact_font_size = max(8, font_size - 3)
@@ -487,14 +499,27 @@ def app_stylesheet(name: str = DEFAULT_APPEARANCE, font_size: int = 12) -> str:
         (
             f"QMainWindow, QWidget#mainRoot, QDialog {{ background: {theme['window']}; }}",
             f"QFrame#appHeader {{ background: {theme['window']}; border-bottom: 1px solid {theme['border']}; }}",
+            f"QFrame#appHeader[windowActive='false'] {{background:{inactive_caption_color(theme)};}}",
+            f"QFrame#appHeader[windowActive='false'] QLabel {{color:{theme['muted']};}}",
             f"QScrollArea#toolboxScroll, QWidget#controlsContent {{ background: {theme['window']}; }}",
+            scrollbar_stylesheet(theme),
             f"QWidget {{ color: {theme['text']}; font-family: 'Segoe UI Variable Text', 'Segoe UI'; font-size: {font_size}px; }}",
+            f"QMenu {{ background: {theme['panel']}; color: {theme['text']}; border: 1px solid {theme['border']}; padding: 4px; }}",
+            "QMenu::item { padding: 6px 12px; border-radius: 4px; }",
+            f"QMenu::item:selected {{ background: {theme['accent']}; color: {selected_control_text(theme)}; }}",
+            f"QMenu::item:disabled {{ color: {theme['muted']}; }}",
+            f"QMenu::separator {{ height: 1px; background: {theme['border']}; margin: 4px 6px; }}",
             f"QFrame#toolSection, QFrame#settingsSection, QFrame#metricsPanel {{ background: {theme['panel']}; border: 1px solid {theme['border']}; border-radius: 12px; }}",
+            f"QFrame#splitPlaneTools {{ background: {theme['panel']}; border: 1px solid {theme['border']}; border-radius: 8px; }}",
+            f"QFrame#splitPlaneTools QLabel {{ color: {theme['text']}; background: transparent; border: none; }}",
             f"QFrame#toolSection[sectionTone='optimization'] {{ border-top: 3px solid {theme['optimization']}; }}",
             f"QFrame#toolSection[sectionTone='stats'] {{ border-top: 3px solid {theme['stats']}; }}",
             f"QFrame#toolSection[sectionTone='general'] {{ background: {theme['general_soft']}; border-top: 3px solid {theme['general']}; }}",
             f"QLabel#sectionTitle {{ color: {theme['text']}; font-size: {font_size}px; font-weight: 700; padding: 2px 0 6px; }}",
+            f"QToolButton#sectionExpander, QToolButton#sectionExpander:checked {{ color: {theme['text']}; border: none; background: transparent; padding: 2px; border-radius: 4px; }}",
+            f"QToolButton#sectionExpander:hover {{ background: {theme['optimization_soft']}; }}",
             f"QLabel#aboutTitle {{ color: {theme['text']}; font-size: {font_size + 6}px; font-weight: 700; }}",
+            f"QLabel#loadingTitle {{ color: {theme['text']}; font-size: {font_size + 6}px; font-weight: 700; }}",
             f"QLabel#sectionIcon[iconTone='optimization'] {{ color: {theme['optimization']}; }}",
             f"QLabel#sectionIcon[iconTone='stats'] {{ color: {theme['stats']}; }}",
             f"QLabel#sectionIcon[iconTone='general'] {{ color: {theme['general']}; }}",
@@ -512,6 +537,11 @@ def app_stylesheet(name: str = DEFAULT_APPEARANCE, font_size: int = 12) -> str:
             f"QPushButton:disabled {{ color: {theme['muted']}; background: {theme['disabled']}; border-color: {theme['border']}; }}",
             f"QPushButton[accent='true'] {{ color: {theme['accent_text']}; background: {theme['accent']}; border-color: {theme['accent']}; font-weight: 600; }}",
             f"QPushButton[accent='true']:hover {{ background: {theme['accent_hover']}; }}",
+            f"QPushButton[accent='true']:pressed {{ background: {theme['accent_hover']}; border-color: {theme['text']}; }}",
+            f"QPushButton[toolMode='true']:checked {{ color: {theme['accent_text']}; background: {theme['accent']}; border-color: {theme['accent']}; }}",
+            f"QPushButton[toolMode='true']:checked:hover {{ background: {theme['accent_hover']}; }}",
+            f"QPushButton[toolMode='true']:disabled {{ color: {theme['muted']}; background: {theme['disabled']}; border-color: {theme['border']}; }}",
+            f"QPushButton[accent='true']:disabled, QPushButton[fileAction='true']:disabled {{ color: {theme['muted']}; background: {theme['disabled']}; border-color: {theme['border']}; }}",
             f"QPushButton[fileAction='true'] {{ color: {theme['file_action_text']}; background: {theme['file_action']}; border-color: {theme['file_action']}; font-weight: 600; }}",
             f"QPushButton[fileAction='true']:hover {{ background: {theme['file_action_hover']}; border-color: {theme['file_action_hover']}; }}",
             f"QPushButton[support='true'] {{ color: #243019; background: {theme['support']}; border-color: {theme['support_border']}; font-weight: 600; }}",
@@ -522,7 +552,7 @@ def app_stylesheet(name: str = DEFAULT_APPEARANCE, font_size: int = 12) -> str:
             "QPushButton[captionButton='true'] { background: transparent; border: 0; border-radius: 0; padding: 0; min-width: 38px; min-height: 28px; }",
             f"QPushButton[captionButton='true']:hover {{ background: {theme['accent_soft']}; }}",
             "QPushButton#captionClose:hover { background: #C42B1C; }",
-            f"QComboBox, QSpinBox, QLineEdit, QPlainTextEdit, QTextBrowser {{ background: {theme['field']}; border: 1px solid {theme['border']}; border-radius: 7px; padding: 5px 8px; min-height: 18px; }}",
+            f"QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit, QPlainTextEdit, QTextBrowser {{ background: {theme['field']}; border: 1px solid {theme['border']}; border-radius: 7px; padding: 5px 8px; min-height: 18px; }}",
             f"QComboBox:hover, QSpinBox:hover, QLineEdit:hover {{ border-color: {theme['accent']}; }}",
             "QComboBox::drop-down { border: 0; width: 22px; }",
             f"QSlider::groove:horizontal {{ height: 6px; border-radius: 3px; background: {theme['border']}; }}",
@@ -592,6 +622,16 @@ def draw_ui_icon(kind: str, color: str, size: int = 18) -> QIcon:
         painter.drawLine(QPointF(m,size*.28),QPointF(size-m,size*.28))
         painter.drawRoundedRect(QRectF(size*.28,size*.32,size*.44,size*.53),1,1)
         painter.drawLine(QPointF(size*.40,size*.14),QPointF(size*.60,size*.14))
+    elif kind == "invert":
+        painter.drawEllipse(r)
+        painter.setBrush(QColor(color))
+        painter.drawPie(r, 90 * 16, 180 * 16)
+    elif kind == "recent":
+        painter.drawArc(r, 35 * 16, 295 * 16)
+        painter.drawLine(QPointF(size*.20,size*.12), QPointF(size*.20,size*.35))
+        painter.drawLine(QPointF(size*.20,size*.35), QPointF(size*.41,size*.35))
+        painter.drawLine(QPointF(size*.50,size*.29), QPointF(size*.50,size*.52))
+        painter.drawLine(QPointF(size*.50,size*.52), QPointF(size*.67,size*.61))
     elif kind == "undo":
         painter.drawArc(QRectF(size*.25,size*.30,size*.60,size*.52),-100*16,260*16)
         painter.drawLine(QPointF(size*.25,size*.30),QPointF(size*.25,size*.53))
@@ -601,6 +641,23 @@ def draw_ui_icon(kind: str, color: str, size: int = 18) -> QIcon:
         painter.drawLine(QPointF(size*.73,size*.27),QPointF(size*.27,size*.73))
     elif kind == "optimize":
         painter.drawPolygon(QPolygonF((QPointF(size / 2, m), QPointF(size - m, size - m), QPointF(m, size - m))))
+    elif kind == "solidify":
+        points = [QPointF(size*x, size*y) for x,y in ((.5,.12),(.85,.31),(.85,.70),(.5,.90),(.15,.70),(.15,.31),(.5,.5))]
+        painter.setBrush(QColor(color))
+        painter.drawPolygon(QPolygonF((points[0],points[1],points[6],points[5])))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for a,b in ((1,2),(2,3),(3,4),(4,5),(5,0),(0,1),(5,6),(6,1),(6,3)):
+            painter.drawLine(points[a],points[b])
+    elif kind == "imprint":
+        painter.drawRoundedRect(QRectF(size*.38,size*.12,size*.24,size*.30),2,2)
+        painter.drawLine(QPointF(size*.5,size*.42),QPointF(size*.5,size*.56))
+        painter.drawRoundedRect(QRectF(size*.21,size*.56,size*.58,size*.15),1,1)
+        painter.drawLine(QPointF(size*.14,size*.86),QPointF(size*.86,size*.86))
+    elif kind == "actions":
+        for y in (.25,.50,.75):
+            painter.drawLine(QPointF(size*.40,size*y),QPointF(size*.86,size*y))
+            painter.drawLine(QPointF(size*.12,size*(y-.02)),QPointF(size*.19,size*(y+.05)))
+            painter.drawLine(QPointF(size*.19,size*(y+.05)),QPointF(size*.29,size*(y-.07)))
     elif kind == "stats":
         for x, top in ((m, size * .53), (size * .43, size * .30), (size * .70, size * .12)):
             painter.drawLine(QPointF(x, size - m), QPointF(x, top))
@@ -705,6 +762,13 @@ class MeshHistoryState:
     committed_optimization: bool
     optimization_script_passes: tuple[dict[str, object], ...]
     optimization_script_omissions: tuple[str, ...]
+    solidification_applied: bool = False
+    target_value: int | None = None
+    quality: str | None = None
+    quality_metrics: dict | None = None
+    quality_measured: bool = False
+    script_base_poly: vtkPolyData | None = None
+    preview_script_step: dict | None = None
 
 
 class _PdhValueUnion(ctypes.Union):
@@ -732,6 +796,12 @@ class WindowsGpuCounters:
 
     def __init__(self) -> None:
         self.available = False
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="windows-gpu-metrics")
+        self._future = None
+        self._last_request = 0.0
+        self._closed = False
+        self.last_sample = None
+        self.adapters = windows_graphics_adapters()
         self.query = ctypes.c_void_p()
         self.engine_counter = ctypes.c_void_p()
         self.memory_counter = ctypes.c_void_p()
@@ -813,29 +883,94 @@ class WindowsGpuCounters:
             normalized = normalized[luid:]
         return normalized.split("_eng_", 1)[0]
 
-    def sample(self) -> tuple[float, float]:
-        if not self.available or self.pdh.PdhCollectQueryData(self.query) != 0:
-            raise OSError("Windows GPU performance counters are unavailable")
-        engines: dict[str, float] = {}
-        for instance, value in self._values(self.engine_counter):
+    @staticmethod
+    def aggregate(engines_raw, memory_raw, process_id, previous_adapter=None):
+        engines, own_engines = {}, {}
+        prefix = f"pid_{process_id}_"
+        for instance, value in engines_raw:
             normalized = instance.lower()
+            if not np.isfinite(value):
+                continue
             luid = normalized.find("luid_")
             engine = normalized[luid:] if luid >= 0 else normalized
             engines[engine] = engines.get(engine, 0.0) + max(0.0, value)
-        loads: dict[str, float] = {}
+            if normalized.startswith(prefix):
+                own_engines[engine] = own_engines.get(engine, 0.0) + max(0.0, value)
+        loads, graphics, compute, own = {}, {}, {}, {}
+        own_graphics = {}
         for engine, value in engines.items():
-            key = self._adapter_key(engine)
+            key = WindowsGpuCounters._adapter_key(engine)
             loads[key] = max(loads.get(key, 0.0), value)
-        memory: dict[str, float] = {}
-        if self.has_memory_counter:
-            for instance, value in self._values(self.memory_counter):
-                memory[self._adapter_key(instance)] = max(0.0, value)
+            kind = engine.split("_engtype_", 1)[-1]
+            if kind == "3d" or kind.startswith("graphics"):
+                graphics[key] = max(graphics.get(key, 0.0), value)
+            if "compute" in kind or "cuda" in kind:
+                compute[key] = max(compute.get(key, 0.0), value)
+        for engine, value in own_engines.items():
+            key = WindowsGpuCounters._adapter_key(engine)
+            own[key] = max(own.get(key, 0.0), value)
+            kind = engine.split("_engtype_", 1)[-1]
+            if kind == "3d" or kind.startswith("graphics"):
+                own_graphics[key] = max(own_graphics.get(key, 0.0), value)
+        memory = {}
+        for instance, value in memory_raw:
+            key = WindowsGpuCounters._adapter_key(instance)
+            memory[key] = max(memory.get(key, 0.0), value)
         if not loads:
             raise OSError("Windows returned no GPU engine samples")
-        adapter = max(loads, key=lambda key: (loads[key], memory.get(key, 0.0)))
-        return max(0.0, min(100.0, loads[adapter])), memory.get(adapter, 0.0)
+        # Follow MeshMill's rendering adapter, not an unrelated busy accelerator.
+        active = {key: value for key, value in own_graphics.items() if value > .01}
+        if active:
+            adapter = max(active, key=active.get)
+        elif previous_adapter in loads:
+            adapter = previous_adapter
+        elif own_graphics:
+            adapter = max(own_graphics, key=lambda key: (own_graphics[key], own.get(key, 0)))
+        elif own:
+            adapter = max(own, key=own.get)
+        else:
+            raise OSError("MeshMill GPU adapter has not been identified yet")
+        return {"adapter": adapter, "load": min(100.0, loads[adapter]),
+                "graphics": min(100.0, graphics.get(adapter, 0.0)),
+                "compute": min(100.0, compute.get(adapter, 0.0)),
+                "process_load": min(100.0, own.get(adapter, 0.0)),
+                "memory": memory.get(adapter, 0.0)}
+
+    def _read_sample(self, previous_adapter):
+        if self.pdh.PdhCollectQueryData(self.query) != 0:
+            raise OSError("Windows GPU performance counters are unavailable")
+        sample = self.aggregate(self._values(self.engine_counter),
+                                self._values(self.memory_counter) if self.has_memory_counter else [],
+                                os.getpid(), previous_adapter)
+        match = re.search(r"luid_0x([0-9a-f]+)_0x([0-9a-f]+)", sample["adapter"])
+        luid = (int(match[1], 16) << 32) | int(match[2], 16) if match else None
+        adapter = next((a for a in self.adapters if a["luid"] == luid), {})
+        sample.update(name=adapter.get("name", "Rendering adapter"),
+                      index=adapter.get("index"), capacity=adapter.get("capacity", 0))
+        return sample
+
+    def sample(self) -> tuple[float, float]:
+        if self._closed or not self.available:
+            raise OSError("Windows GPU performance counters are unavailable")
+        if self._future is not None and self._future.done():
+            try:
+                self.last_sample = self._future.result()
+            except OSError:
+                self.last_sample = None
+            finally:
+                self._future = None
+        now = time.monotonic()
+        if self._future is None and now - self._last_request >= .2:
+            self._last_request = now
+            adapter = self.last_sample["adapter"] if self.last_sample else None
+            self._future = self._executor.submit(self._read_sample, adapter)
+        if self.last_sample is None:
+            raise OSError("Waiting for a Windows GPU engine sample")
+        return self.last_sample["load"], self.last_sample["memory"]
 
     def close(self) -> None:
+        self._closed = True
+        self._executor.shutdown(wait=True, cancel_futures=True)
         if getattr(self, "query", None):
             try:
                 self.pdh.PdhCloseQuery(self.query)
@@ -845,48 +980,61 @@ class WindowsGpuCounters:
 
 
 class NvidiaSmiCounters:
-    """Cached per-adapter CUDA activity from NVIDIA's standard diagnostic utility."""
+    """Nonblocking cached per-adapter activity from NVIDIA's diagnostic utility."""
 
     def __init__(self) -> None:
         self._last_sample_at = 0.0
         self._samples: dict[str, tuple[float, float]] = {}
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gpu-metrics")
+        self._future = None
+        self._closed = False
+
+    @staticmethod
+    def _read_samples() -> dict[str, tuple[float, float]]:
+        samples: dict[str, tuple[float, float]] = {}
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=pci.bus_id,utilization.gpu,memory.used",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=0.4,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False,
+            )
+            for line in result.stdout.splitlines():
+                parts = [part.strip() for part in line.split(",")]
+                if len(parts) != 3:
+                    continue
+                try:
+                    samples[parts[0].lower()] = (float(parts[1]), float(parts[2]) * 1024 * 1024)
+                except ValueError:
+                    continue
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return samples
 
     def sample(self, preference: str = "system") -> tuple[float, float] | None:
+        if self._closed:
+            return None
         now = time.monotonic()
-        if now - self._last_sample_at >= 1.0:
+        if self._future is not None and self._future.done():
             try:
-                result = subprocess.run(
-                    [
-                        "nvidia-smi",
-                        "--query-gpu=pci.bus_id,utilization.gpu,memory.used",
-                        "--format=csv,noheader,nounits",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=0.4,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                    check=False,
-                )
-                samples: dict[str, tuple[float, float]] = {}
-                for line in result.stdout.splitlines():
-                    parts = [part.strip() for part in line.split(",")]
-                    if len(parts) != 3:
-                        continue
-                    try:
-                        samples[parts[0].lower()] = (float(parts[1]), float(parts[2]) * 1024 * 1024)
-                    except ValueError:
-                        continue
+                samples = self._future.result()
                 if samples:
                     self._samples = samples
-            except (OSError, subprocess.SubprocessError):
-                pass
+            finally:
+                self._future = None
+        if not self._closed and self._future is None and now - self._last_sample_at >= 1.0:
             self._last_sample_at = now
+            self._future = self._executor.submit(self._read_samples)
         if not self._samples:
             return None
         selected = preference.lower()
         if selected != "system" and selected in self._samples:
             return self._samples[selected]
         return min(self._samples.values(), key=lambda value: value[1])
+
+    def close(self) -> None:
+        self._closed = True
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
 
 class ElidedPathLabel(QLabel):
@@ -1016,17 +1164,52 @@ class OrientationIndicator(QWidget):
     """Compact world-axis view indicator for the active camera."""
 
     def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        # The cube and compact X/Y/Z readout need roughly 130 px. Keep the overlay tight so it
-        # reads as a viewport aid rather than a panel occupying the scene.
-        self.setFixedSize(138, 102)
-        self.setToolTip("Camera rotation relative to the mesh's current X, Y, and Z axes.")
+        flags = (Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+                 | Qt.WindowType.WindowTransparentForInput
+                 | Qt.WindowType.WindowDoesNotAcceptFocus)
+        super().__init__(parent, flags if parent is not None else Qt.WindowType.Widget)
+        self._overlay_parent = parent
+        self._overlay_position = QPoint(14, 14)
+        self._overlay_requested_visible = True
+        if parent is not None:
+            parent.window().installEventFilter(self)
+            parent.installEventFilter(self)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        # Keep the mesh miniature and axis labels readable in a compact overlay.
+        self.setFixedSize(190, 190)
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setToolTip("Current workspace mesh inside the axis cube. Solid edges face the camera; dashed edges are behind. The miniature follows camera rotation and saved-axis changes.")
+        self._miniature = None
+        self._world_right = np.array((1., 0., 0.))
+        self._world_up = np.array((0., 1., 0.))
+        self._world_forward = np.array((0., 0., -1.))
         self._right = np.array((1.0, 0.0, 0.0))
         self._up = np.array((0.0, 1.0, 0.0))
         self._forward = np.array((0.0, 0.0, -1.0))
         self._orientation = (0.0, 0.0, 0.0)
         self._theme = appearance_theme(DEFAULT_APPEARANCE)
         self._viewport_background = QColor(self._theme["viewport"])
+
+    def move(self, *args) -> None:
+        self._overlay_position = QPoint(*args) if len(args) == 2 else QPoint(args[0])
+        parent = self._overlay_parent
+        position = parent.mapToGlobal(self._overlay_position) if parent is not None else self._overlay_position
+        super().move(position)
+
+    def setVisible(self, visible: bool) -> None:
+        self._overlay_requested_visible = visible
+        parent = self._overlay_parent
+        available = parent is None or (parent.window().isVisible() and not parent.window().isMinimized())
+        super().setVisible(visible and available)
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() in (QEvent.Type.Move, QEvent.Type.Resize, QEvent.Type.Show,
+                            QEvent.Type.Hide, QEvent.Type.WindowStateChange):
+            self.move(self._overlay_position)
+            self.setVisible(self._overlay_requested_visible)
+        return super().eventFilter(watched, event)
 
     def set_theme(self, theme: dict[str, str], viewport_theme: dict[str, str] | None = None) -> None:
         self._theme = theme
@@ -1048,10 +1231,10 @@ class OrientationIndicator(QWidget):
         up /= max(float(np.linalg.norm(up)), 1e-12)
         right = np.cross(forward, up)
         right /= max(float(np.linalg.norm(right)), 1e-12)
+        self._world_right, self._world_up, self._world_forward = right.copy(), up.copy(), forward.copy()
         if reference_basis is not None and reference_basis.shape == (3, 3):
-            # A saved named view becomes the indicator's local zero. Express the
-            # live camera frame in that basis so the cube and axes agree with the
-            # zeroed X/Y/Z readout.
+            # Keep the mesh reference fixed while named views move the camera.
+            # Recalling a view should rotate the cube, not redefine its axes.
             self._right = reference_basis.T @ right
             self._up = reference_basis.T @ up
             self._forward = reference_basis.T @ forward
@@ -1062,17 +1245,26 @@ class OrientationIndicator(QWidget):
         self._orientation = tuple(float(value) for value in orientation)
         self.update()
 
+    def set_miniature(self, mesh) -> None:
+        self._miniature = mesh
+        self.update()
+
+    def miniature_projection(self):
+        if self._miniature is None:
+            return None
+        points, faces = self._miniature
+        screen = np.column_stack((points @ self._world_right, -points @ self._world_up))
+        return screen, points @ self._world_forward, faces
+
     def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), self._viewport_background)
+        # An owned translucent surface is composited separately from native VTK.
+        # Clear the whole frame instead of changing a native child-window mask.
+        artwork = QPixmap(self.size())
+        artwork.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(artwork)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(self._theme["border"]), 1.0))
-        panel_color = QColor(self._theme["panel"])
-        panel_color.setAlpha(242)
-        painter.setBrush(panel_color)
-        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 9, 9)
         center_x = self.width() / 2.0
-        center = QPointF(center_x, 47.0)
+        center = QPointF(center_x, self.height() / 2.0)
 
         # Project a real cube in the same camera basis as the axes. The old static diamond
         # implied orientation but did not rotate with the live X/Y/Z arrows.
@@ -1089,7 +1281,7 @@ class OrientationIndicator(QWidget):
             (0, 1, 2, 3), (4, 5, 6, 7), (0, 1, 5, 4),
             (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7),
         )
-        cube_scale = 15.0
+        cube_scale = 23.0
         projected_cube = [
             QPointF(
                 center.x() + float(vertex @ self._right) * cube_scale,
@@ -1097,14 +1289,59 @@ class OrientationIndicator(QWidget):
             )
             for vertex in cube_vertices
         ]
-        painter.setPen(QPen(QColor(self._theme["text"]), 1.1))
-        cube_color = QColor(self._theme["surface"])
-        for face in sorted(cube_faces, key=lambda indices: float(np.mean(cube_vertices[list(indices)] @ self._forward))):
-            face_color = QColor(cube_color)
-            depth = float(np.mean(cube_vertices[list(face)] @ self._forward))
-            face_color.setAlpha(105 if depth < 0 else 185)
-            painter.setBrush(face_color)
-            painter.drawPolygon(QPolygonF([projected_cube[index] for index in face]))
+        silhouette_path = QPainterPath()
+        for face in cube_faces:
+            face_path = QPainterPath()
+            face_path.addPolygon(QPolygonF([projected_cube[index] for index in face]))
+            face_path.closeSubpath()
+            silhouette_path = silhouette_path.united(face_path)
+        painter.setBrush(QColor("#102033"))
+        painter.setPen(QPen(QColor("#102033"), 7.0))
+        painter.drawPath(silhouette_path)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor("#EAF3FF"), 2.5))
+        painter.drawPath(silhouette_path)
+        face_colors = (QColor("#FF5A5F"), QColor("#B8F35A"), QColor("#4DA3FF"))
+        ordered_faces = sorted(cube_faces, key=lambda indices: -float(np.mean(cube_vertices[list(indices)] @ self._forward)))
+        def draw_cube_faces(rear):
+            for face in ordered_faces:
+                vertices = cube_vertices[list(face)]
+                axis = int(np.argmin(np.ptp(vertices, axis=0)))
+                outward = np.zeros(3)
+                outward[axis] = vertices[0, axis]
+                behind = float(outward @ self._forward) >= 0
+                if behind != rear:
+                    continue
+                color = QColor(face_colors[axis])
+                if vertices[0, axis] < 0:
+                    color = color.darker(200)
+                fill = QColor(color)
+                fill.setAlpha(70 if rear else 65)
+                painter.setBrush(fill)
+                color.setAlpha(180 if rear else 255)
+                pen = QPen(color, 1.0 if rear else 1.4)
+                if rear:
+                    pen.setStyle(Qt.PenStyle.DashLine)
+                painter.setPen(pen)
+                painter.drawPolygon(QPolygonF([projected_cube[index] for index in face]))
+        draw_cube_faces(True)
+        miniature = self.miniature_projection()
+        if miniature is not None:
+            screen, depth, faces = miniature
+            projected = screen * cube_scale + (center.x(), center.y())
+            points = self._miniature[0]
+            triangles = points[faces]
+            normal = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+            normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-12)
+            lighting = np.abs(normal @ (-self._world_forward * .8 + self._world_up * .4))
+            painter.setPen(Qt.PenStyle.NoPen)
+            base = QColor(self._theme["accent"])
+            shades = [base.lighter(115 + 10 * level) for level in range(6)]
+            shade_indices = np.minimum(5, (lighting * 5).astype(int))
+            for index in np.argsort(-depth[faces].mean(axis=1)):
+                painter.setBrush(shades[shade_indices[index]])
+                painter.drawPolygon(QPolygonF([QPointF(*p) for p in projected[faces[index]]]))
+        draw_cube_faces(False)
 
         axes = (
             ("X", np.array((1.0, 0.0, 0.0)), QColor("#FF5A5F")),
@@ -1116,26 +1353,72 @@ class OrientationIndicator(QWidget):
             screen = np.array((float(axis @ self._right), -float(axis @ self._up)))
             depth = float(axis @ self._forward)
             projected.append((depth, label, screen, color))
-        for depth, label, screen, color in sorted(projected):
-            end = center + QPointF(float(screen[0] * 29.0), float(screen[1] * 29.0))
-            pen = QPen(color, 3.0 if depth >= 0 else 1.5)
-            if depth < 0:
-                pen.setStyle(Qt.PenStyle.DashLine)
-            painter.setPen(pen)
-            painter.drawLine(center, end)
-            painter.setPen(color)
-            painter.drawText(QRect(int(end.x() - 8), int(end.y() - 9), 16, 18), Qt.AlignmentFlag.AlignCenter, label)
+        label_positions = []
+        for depth, label, screen, color in sorted(projected, key=lambda item: item[1]):
+            end = center + QPointF(float(screen[0] * 36.0), float(screen[1] * 36.0))
+            color = color.darker(round(100 + 90 * (depth + 1) / 2))
+            magnitude = float(np.linalg.norm(screen))
+            anchor = {"X": (1., .2), "Y": (-.3, -1.), "Z": (.8, -.7)}[label]
+            offset = screen * 67 + np.asarray(anchor) * 68 * (1 - magnitude) ** 2
+            badge_center = center + QPointF(float(offset[0]), float(offset[1]))
+            label_positions.append((end, badge_center, label, color))
 
-        x, y, z = (round(value) for value in self._orientation)
-        painter.setPen(QColor(self._theme["text"]))
-        angle_font = painter.font()
-        angle_font.setPointSizeF(8.5)
-        painter.setFont(angle_font)
-        painter.drawText(
-            QRect(6, 77, self.width() - 12, 20),
-            Qt.AlignmentFlag.AlignCenter,
-            f"X {x:+d}°  Y {y:+d}°  Z {z:+d}°",
+        label_font = painter.font()
+        label_font.setPointSizeF(max(9.0, label_font.pointSizeF() * .78))
+        label_font.setBold(False)
+        painter.setFont(label_font)
+        values = dict(zip("XYZ", (round(value) for value in self._orientation)))
+        badge_text = {label: f"{label}: {values[label]:+d}°" for label in "XYZ"}
+        metrics = painter.fontMetrics()
+        badge_width = max(metrics.horizontalAdvance(text) for text in badge_text.values()) + 10
+        badge_height = metrics.height() + 6
+        from orientation_layout import place_axis_badges
+
+        cube_bounds = (
+            min(point.x() for point in projected_cube),
+            min(point.y() for point in projected_cube),
+            max(point.x() for point in projected_cube),
+            max(point.y() for point in projected_cube),
         )
+        badge_points = place_axis_badges(
+            [(item[1].x(), item[1].y()) for item in label_positions],
+            cube_bounds, self.width(), self.height(), badge_width, badge_height,
+        )
+        for index, (end, _badge_center, label, color) in enumerate(label_positions):
+            badge = QRect(round(badge_points[index, 0] - badge_width / 2),
+                          round(badge_points[index, 1] - badge_height / 2), badge_width, badge_height)
+            # Keep the connector and its halo outside the miniature's area.
+            painter.save()
+            outside_cube = QPainterPath()
+            outside_cube.addRect(QRectF(self.rect()))
+            cube_clearance = QPainterPath()
+            cube_clearance.addRect(QRectF(
+                cube_bounds[0] - 6, cube_bounds[1] - 6,
+                cube_bounds[2] - cube_bounds[0] + 12,
+                cube_bounds[3] - cube_bounds[1] + 12,
+            ))
+            painter.setClipPath(outside_cube.subtracted(cube_clearance))
+            leader = QColor(color)
+            leader.setAlpha(255)
+            painter.setPen(QPen(QColor("#102033"), 5.0))
+            painter.drawLine(end, QPointF(badge.center()))
+            painter.setPen(QPen(leader, 2.0))
+            painter.drawLine(end, QPointF(badge.center()))
+            painter.restore()
+            border = QColor(color)
+            border.setAlpha(255)
+            painter.setBrush(QColor("#102033"))
+            painter.setPen(QPen(QColor("#102033"), 6.0))
+            painter.drawRoundedRect(badge, 5, 5)
+            painter.setPen(QPen(border, 1.5))
+            painter.drawRoundedRect(badge, 5, 5)
+            painter.setPen(QColor("#FFFFFF"))
+            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, badge_text[label])
+        painter.end()
+        canvas = QPainter(self)
+        canvas.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        canvas.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        canvas.drawPixmap(0, 0, artwork)
 
 
 class ViewportScaleBar(QWidget):
@@ -1747,10 +2030,12 @@ def fmt_size(size: tuple[float, float, float]) -> str:
 
 def polydata_arrays(poly: vtkPolyData) -> tuple[np.ndarray, np.ndarray]:
     points = np.asarray(vtk_to_numpy(poly.GetPoints().GetData()), dtype=np.float64)
-    raw = np.asarray(vtk_to_numpy(poly.GetPolys().GetData()))
-    if raw.size % 4 or np.any(raw[0::4] != 3):
-        raise ValueError("The STL did not resolve to a triangle-only mesh.")
-    faces = np.asarray(raw.reshape(-1, 4)[:, 1:], dtype=np.int32)
+    cells = poly.GetPolys()
+    offsets = vtk_to_numpy(cells.GetOffsetsArray())
+    indices = vtk_to_numpy(cells.GetConnectivityArray())
+    if np.any(np.diff(offsets) != 3):
+        raise ValueError("The geometry did not resolve to a triangle-only mesh.")
+    faces = np.asarray(indices.reshape(-1, 3), dtype=np.int32)
     return points, faces
 
 
@@ -1773,6 +2058,9 @@ def arrays_polydata(points: np.ndarray, faces: np.ndarray) -> vtkPolyData:
 def load_stl(
     path: Path, progress_callback: Callable[[str, int, int], None] | None = None,
 ) -> tuple[vtkPolyData, np.ndarray, np.ndarray]:
+    if path.suffix.lower() != '.stl':
+        from mesh_formats import load_geometry
+        return load_geometry(path, progress_callback)
     reader = vtkSTLReader()
     reader.SetFileName(os.fspath(path))
     reader.MergingOn()
@@ -1870,7 +2158,15 @@ def load_stl_smart(
     algorithm: str = "Fast QEM",
     allow_auto_tiling: bool = True,
 ) -> tuple[vtkPolyData, np.ndarray, np.ndarray, dict]:
-    triangle_count = binary_stl_triangle_count(path)
+    triangle_count = binary_stl_triangle_count(path) if path.suffix.lower() == '.stl' else None
+    if path.suffix.lower() != '.stl':
+        if path.stat().st_size*10 > memory_budget_bytes and mode != 'full':
+            raise MemoryError('This format requires full-memory import. Increase the memory budget or convert to binary STL for bounded-memory loading.')
+        poly, points, faces = load_stl(path, progress_callback)
+        measurements = source_geometry_measurements(points, faces, progress_callback, cancel_event)
+        return poly, points, faces, {'overview': False, 'total_triangles': len(faces),
+            'estimated_memory': points.nbytes+faces.nbytes,
+            'measurements': measurements, 'render_poly': prepare_viewport_poly(poly, progress_callback)}
     estimated_memory = (
         triangle_count * ESTIMATED_BYTES_PER_TRIANGLE
         if triangle_count is not None
@@ -1981,9 +2277,9 @@ def automatic_overview_triangle_limit(memory_budget_bytes: int, vram_capacity_by
     return max(100_000, min(4_000_000, int(capacity)))
 
 
-def dedicated_vram_capacity() -> int:
+def windows_graphics_adapters() -> list[dict]:
     if os.name != "nt":
-        return 0
+        return []
 
     class Guid(ctypes.Structure):
         _fields_ = [
@@ -2024,14 +2320,14 @@ def dedicated_vram_capacity() -> int:
         create_factory.argtypes = [ctypes.POINTER(Guid), ctypes.POINTER(ctypes.c_void_p)]
         create_factory.restype = ctypes.c_long
         if create_factory(ctypes.byref(iid), ctypes.byref(factory)) < 0 or not factory.value:
-            return 0
+            return []
 
         enum_adapter = method(
             factory,
             12,
             ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p)),
         )
-        capacities: list[int] = []
+        adapters = []
         index = 0
         while True:
             adapter = ctypes.c_void_p()
@@ -2047,12 +2343,14 @@ def dedicated_vram_capacity() -> int:
             )
             desc = AdapterDesc1()
             if get_desc(adapter, ctypes.byref(desc)) >= 0 and not (desc.Flags & 2):
-                capacities.append(int(desc.DedicatedVideoMemory))
+                adapters.append({"index": index, "name": desc.Description,
+                                 "luid": int(desc.AdapterLuid) & 0xFFFFFFFFFFFFFFFF,
+                                 "capacity": int(desc.DedicatedVideoMemory)})
             release_adapter(adapter)
             index += 1
-        return max(capacities, default=0)
+        return adapters
     except (AttributeError, OSError, ValueError):
-        return 0
+        return []
     finally:
         if factory.value:
             release_factory = method(
@@ -2061,7 +2359,24 @@ def dedicated_vram_capacity() -> int:
             release_factory(factory)
 
 
+def dedicated_vram_capacity() -> int:
+    return max((adapter["capacity"] for adapter in windows_graphics_adapters()), default=0)
+
+
+def suggested_mesh_path(source: Path, triangle_count: int) -> Path:
+    """Replace generated triangle-count suffixes instead of stacking them."""
+    stem = re.sub(r"(?:_\d+k)+$", "", source.stem, flags=re.IGNORECASE) or "mesh"
+    output = source.with_name(f"{stem}_{triangle_count // 1000}k.stl")
+    if output.name.casefold() == source.name.casefold():
+        output = output.with_name(f"{output.stem}_export.stl")
+    return output
+
+
 def save_stl(poly: vtkPolyData, path: Path) -> None:
+    marker = poly.GetFieldData().GetArray("ImprintClosedOutput")
+    if marker is not None:
+        from imprint_cleanup import clean_generated_mesh
+        poly, _ = clean_generated_mesh(poly, closed=bool(marker.GetValue(0)))
     writer = vtkSTLWriter()
     writer.SetFileName(os.fspath(path))
     writer.SetFileTypeToBinary()
@@ -2114,8 +2429,15 @@ class MeshInteractorStyle(vtkInteractorStyleTrackballCamera):
         self.AddObserver("KeyReleaseEvent", self._key_release)
 
     def _left_press(self, _obj, _event) -> None:
+        lathe = getattr(self, "_lathe_callback", None)
+        if lathe is not None and lathe("press", self.GetInteractor().GetEventPosition()):
+            return
         self._wheel_timer.stop()
         self._wheel_steps = 0
+        surface_pick = getattr(self, "_surface_pick_callback", None)
+        if surface_pick is not None and surface_pick(self.GetInteractor().GetEventPosition()):
+            self._consume_left_release = True
+            return
         if (
             self.GetInteractor().GetShiftKey()
             and not self.GetInteractor().GetControlKey()
@@ -2143,6 +2465,9 @@ class MeshInteractorStyle(vtkInteractorStyleTrackballCamera):
             self.StartPan()
 
     def _left_release(self, _obj, _event) -> None:
+        lathe = getattr(self, "_lathe_callback", None)
+        if lathe is not None and lathe("release", self.GetInteractor().GetEventPosition()):
+            return
         if self._consume_left_release:
             self._consume_left_release = False
             if self._crop_edit_down:
@@ -2205,6 +2530,9 @@ class MeshInteractorStyle(vtkInteractorStyleTrackballCamera):
         self._widget.setCursor(Qt.CursorShape.ArrowCursor)
 
     def _mouse_move(self, _obj, _event) -> None:
+        lathe = getattr(self, "_lathe_callback", None)
+        if lathe is not None and lathe("move", self.GetInteractor().GetEventPosition()):
+            return
         if self._crop_down:
             self._crop_callback("move", self.GetInteractor().GetEventPosition())
         elif self._crop_edit_down:
@@ -2369,6 +2697,9 @@ class MeshInteractorStyle(vtkInteractorStyleTrackballCamera):
             interactor.Render()
 
     def _zoom_at_cursor(self, factor: float, movement_scale: float = 1.) -> None:
+        callback = getattr(self, "_manual_zoom_callback", None)
+        if callback is not None:
+            callback()
         interactor = self.GetInteractor()
         x, y = interactor.GetEventPosition()
         self.FindPokedRenderer(x, y)
@@ -2419,7 +2750,8 @@ class MeshInteractorStyle(vtkInteractorStyleTrackballCamera):
                 diagonal = float(np.linalg.norm(bounds[[1, 3, 5]] - bounds[[0, 2, 4]]))
             else:
                 diagonal = 0.0
-            minimum_step = max(diagonal * 0.0015, 1e-6) * movement_scale
+            inspection = bool(getattr(self, "_calibrated_inspection", False))
+            minimum_step = max(diagonal * (1e-6 if inspection else .0015), 1e-9 if inspection else 1e-6) * movement_scale
             view_direction = np.asarray(camera.GetDirectionOfProjection(), dtype=float)
             view_direction /= max(float(np.linalg.norm(view_direction)), 1e-12)
             forward_depth = float(ray @ view_direction)
@@ -2437,7 +2769,7 @@ class MeshInteractorStyle(vtkInteractorStyleTrackballCamera):
             # forward part changes camera distance, preventing the fixed-distance stall while the
             # lateral part keeps the selected screen position anchored under the pointer.
             focal_offset = offset - view_direction * float(offset @ view_direction)
-            safe_focal_distance = max(diagonal * 0.002, 1e-5)
+            safe_focal_distance = max(diagonal * (1e-6 if inspection else .002), 1e-8 if inspection else 1e-5)
             remaining_focal_distance = camera.GetDistance() - float(offset @ view_direction)
             if remaining_focal_distance < safe_focal_distance:
                 # Carry the focal point forward only as much as needed to preserve camera
@@ -2529,6 +2861,7 @@ def mesh_surface_area(
     faces: np.ndarray,
     progress: Callable[[int, int], None] | None = None,
     cancel_event: threading.Event | None = None,
+    mass_moment: np.ndarray | None = None,
 ) -> float:
     """Return mesh area in bounded batches so long runs can report progress."""
     face_count = len(faces)
@@ -2544,7 +2877,11 @@ def mesh_surface_area(
         a = points[batch[:, 0]]
         b = points[batch[:, 1]]
         c = points[batch[:, 2]]
-        area += float((0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)).sum())
+        triangle_areas = 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
+        area += float(triangle_areas.sum())
+        if mass_moment is not None:
+            centroids = (a.astype(np.float64)+b+c)/3.
+            mass_moment += np.sum(centroids*triangle_areas[:,None],axis=0)
         if progress is not None:
             progress(stop, face_count)
     return area
@@ -2553,12 +2890,14 @@ def mesh_surface_area(
 def source_geometry_measurements(points, faces, progress=None, cancel_event=None):
     """Measure one immutable mesh revision using the existing CPU arithmetic."""
     bounds = points.max(axis=0) - points.min(axis=0)
+    mass_moment = np.zeros(3)
     area = mesh_surface_area(
-        points, faces, cancel_event=cancel_event,
+        points, faces, cancel_event=cancel_event, mass_moment=mass_moment,
         progress=(lambda done, total: progress("Measuring source geometry", done, total))
         if progress is not None else None,
     )
-    return {"bounds": bounds, "area": area}
+    center = mass_moment/area if area>0 else np.mean(points,axis=0)
+    return {"bounds": bounds, "area": area, "center_of_mass": center}
 
 
 def prepare_viewport_poly(poly, progress=None):
@@ -2633,6 +2972,9 @@ def mesh_quality_metrics(
     """Calculate compact, deterministic quality indicators for the Stats panel."""
     if not len(source_points) or not len(output_points):
         return {}
+    from geometry_workload import record
+    record("CPU", source_points, source_faces)
+    record("CPU", output_points, output_faces)
     rng = np.random.default_rng(20261005)
     sample_size = min(sample_count, len(source_points))
     samples = source_points[rng.choice(len(source_points), sample_size, replace=False)]
@@ -2698,6 +3040,8 @@ def mesh_quality_metrics(
     if gpu_preference is not None:
         from depth_adaptive_qem import readonly_gpu_edge_counts
         edge_counts = readonly_gpu_edge_counts(output_faces, gpu_preference)
+        if edge_counts is not None:
+            record("GPU", np.empty((0, 3), dtype=output_points.dtype), output_faces)
     if edge_counts is None:
         edge_counts = readonly_cpu_edge_counts(output_faces, progress, cancel_event)
     if progress is not None:
@@ -2764,7 +3108,7 @@ def smart_target(points: np.ndarray, faces: np.ndarray, quality: str, measuremen
     # prevent a noisy scan from making every preset nearly full density.
     quality_cap = {"Draft": 0.15, "Balanced": 0.50, "Fine": 0.75}[quality]
     upper = min(750_000, max(1_000, round(len(faces) * quality_cap)))
-    return max(10_000, min(upper, estimate))
+    return min(upper, max(10_000, estimate))
 
 
 def density_color_stops(
@@ -2886,10 +3230,15 @@ def point_density_colors(
     if gpu_preference is not None:
         from depth_adaptive_qem import readonly_gpu_density_field
         field = readonly_gpu_density_field(points, faces, gpu_preference, progress, cancel_event)
+        if field is not None:
+            from geometry_workload import record
+            record("GPU", points, faces)
     if cancel_event is not None and cancel_event.is_set():
         raise OperationCancelled
     if field is None:
         field = _cpu_density_field(points, faces, cancel_event, progress)
+    from geometry_workload import record
+    record("CPU", points, faces)
     smoothed, valid = field
     normalized = np.zeros(len(points), dtype=np.float64)
     if np.any(valid):
@@ -2966,13 +3315,37 @@ def simplify_arrays(
     gpu_preference: str = "system",
     progress: Callable[[str, int, int], None] | None = None,
     probe_statistics: dict | None = None,
+    preserve_closed: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
+    from closed_reduction import validate_closed_reduction
+    output_points, output_faces = _simplify_arrays_backend(
+        points, faces, target, algorithm, aggressiveness, gpu_preference, progress, probe_statistics,
+    )
+    if preserve_closed:
+        output_points, output_faces = validate_closed_reduction(output_points, output_faces, progress)
+    return output_points, output_faces
+
+
+def _simplify_arrays_backend(
+    points: np.ndarray,
+    faces: np.ndarray,
+    target: int,
+    algorithm: str,
+    aggressiveness: float = 7.0,
+    gpu_preference: str = "system",
+    progress: Callable[[str, int, int], None] | None = None,
+    probe_statistics: dict | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    from geometry_workload import record
+    record("CPU", points, faces)
     reduction = 1.0 - target / len(faces)
     if algorithm == DEPTH_DENSITY_ADAPTIVE_LABEL:
         output_points, output_faces, _report = simplify_depth_density_adaptive_qem(
             points, faces, target, aggressiveness, gpu_preference, progress=progress,
             source_statistics=probe_statistics,
         )
+        if _report.get("backend") == "CUDA":
+            record("GPU", points, faces)
         return output_points, output_faces
     if algorithm == DEPTH_ADAPTIVE_LABEL or algorithm == "Depth Adaptive QEM":
         output_points, output_faces, _report = simplify_depth_adaptive_qem(
@@ -2984,6 +3357,8 @@ def simplify_arrays(
             progress=progress,
             source_statistics=probe_statistics,
         )
+        if _report.get("backend") == "CUDA":
+            record("GPU", points, faces)
         return output_points, output_faces
     if algorithm == "Fast QEM":
         return simplify_with_progress(
@@ -3041,21 +3416,26 @@ def simplify_process_job(
     progress_path: str | None = None,
     source_measurements: dict | None = None,
     probe_statistics: dict | None = None,
+    preserve_closed: bool = False,
 ):
     """Run native simplification outside the UI process."""
+    from geometry_workload import difference, snapshot
+    workload_before = snapshot()
     try:
         report = lambda stage, completed, total: _write_process_progress(
             progress_path, stage, completed, total
         )
         p_out, f_out = simplify_arrays(
             points, faces, target, algorithm, gpu_preference=gpu_preference, progress=report,
-            probe_statistics=probe_statistics,
+            probe_statistics=probe_statistics, preserve_closed=preserve_closed,
         )
         metrics = mesh_quality_metrics(
             points, faces, p_out, f_out, progress=report, source_measurements=source_measurements,
             gpu_preference=gpu_preference if is_gpu_guided_algorithm(algorithm) else None,
         )
         report("Preparing optimized mesh", 1, 1)
+        metrics["closed_output"] = preserve_closed
+        metrics["geometry_workload"] = difference(snapshot(), workload_before)
         return p_out, f_out, metrics, None
     except Exception:  # noqa: BLE001 - worker boundary returns tracebacks to the UI process
         return None, None, None, traceback.format_exc()
@@ -3064,13 +3444,13 @@ def simplify_process_job(
 def depth_adaptive_progress_text(gpu_preference: str = "system") -> str:
     if first_time_gpu_setup_needed(gpu_preference):
         return "First-time GPU setup: preparing and caching kernels (one-time setup)"
-    return "Analyzing surface on GPU"
+    return "Analyzing surface"
 
 
 def cli_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="MeshMillCLI",
-        description="Optimize an STL locally without changing its coordinate scale.",
+        description="Optimize mesh geometry or run a headless mesh workflow.",
         epilog=(
             "Examples:\n"
             "  MeshMillCLI input.stl --quality balanced\n"
@@ -3082,8 +3462,8 @@ def cli_main(argv: list[str]) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {APP_VERSION}")
-    parser.add_argument("input", type=Path, help="Input STL file")
-    parser.add_argument("-o", "--output", type=Path, help="Output STL filename")
+    parser.add_argument("input", type=Path, help="Input STL, COLLADA, GLB, OBJ or PLY mesh")
+    parser.add_argument("-o", "--output", type=Path, help="Output STL, COLLADA, GLB, OBJ or PLY filename")
     choice = parser.add_mutually_exclusive_group()
     choice.add_argument("-t", "--target", type=int, help="Target triangle count")
     choice.add_argument(
@@ -3111,16 +3491,29 @@ def cli_main(argv: list[str]) -> int:
         "--gpu", default="system", metavar="PCI_BUS_ID",
         help="CUDA GPU PCI bus ID for GPU-guided algorithms, or system (default: system)",
     )
+    parser.add_argument("--workflow", type=Path, help="Run a version 1 JSON workflow: Optimize, Solidify, Cast and format conversion")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output file")
     args = parser.parse_args(argv)
 
     source = args.input.expanduser().resolve()
     if not source.is_file():
         parser.error(f"input file does not exist: {source}")
-    if source.suffix.lower() != ".stl":
-        parser.error("input must be an STL file")
+    if source.suffix.lower() not in {'.stl', '.dae', '.glb', '.obj', '.ply'}:
+        parser.error("input must be STL, COLLADA, GLB, OBJ or PLY")
     if not 0 <= args.aggressiveness <= 10:
         parser.error("aggressiveness must be between 0 and 10")
+
+    if args.workflow is not None:
+        if (args.target is not None or args.quality is not None or args.preset is not None
+                or args.algorithm != 'auto' or args.gpu != 'system' or args.aggressiveness != 7):
+            parser.error("workflow settings belong in the workflow file")
+        from mesh_workflow import load_workflow, run_workflow
+        try:
+            run_workflow(source, args.output or source.with_name(source.stem + "_processed.stl"),
+                         load_workflow(args.workflow), overwrite=args.overwrite)
+        except (ValueError, OSError, RuntimeError, MemoryError, ImportError) as error:
+            parser.exit(1, f"MeshMill: {error}\n")
+        return 0
 
     print(f"Loading: {source}", flush=True)
     poly, points, faces = load_stl(source)
@@ -3143,11 +3536,13 @@ def cli_main(argv: list[str]) -> int:
 
     output = args.output
     if output is None:
-        output = source.with_name(f"{source.stem}_{target // 1000}k.stl")
+        output = suggested_mesh_path(source, target)
     else:
         output = output.expanduser().resolve()
     if output == source:
         parser.error("output must differ from input")
+    if output.suffix.lower() not in {'.stl', '.dae', '.glb', '.obj', '.ply'}:
+        parser.error("output must be STL, COLLADA, GLB, OBJ or PLY")
     if output.exists() and not args.overwrite:
         parser.error(f"output already exists: {output} (use --overwrite to replace it)")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -3171,7 +3566,7 @@ def cli_main(argv: list[str]) -> int:
         print(
             "First-time GPU setup: preparing and caching kernels (one-time setup)..."
             if first_time_gpu_setup_needed(args.gpu)
-            else "Analyzing surface on GPU...",
+            else "Analyzing surface...",
             flush=True,
         )
     reduced_points, reduced_faces = simplify_arrays(
@@ -3180,7 +3575,11 @@ def cli_main(argv: list[str]) -> int:
     reduced = arrays_polydata(reduced_points, reduced_faces)
     reduced_size = np.asarray(bounds_size(reduced.GetBounds()))
     drift = np.abs(reduced_size - original_size)
-    save_stl(reduced, output)
+    if output.suffix.lower() == '.stl':
+        save_stl(reduced, output)
+    else:
+        from mesh_export import write_polygon_mesh
+        write_polygon_mesh(reduced_points, reduced_faces, output)
     print(f"Result: {len(reduced_faces):,} triangles", flush=True)
     print(f"Dimensions: {fmt_size(tuple(reduced_size))}", flush=True)
     print(f"Dimension drift: {fmt_size(tuple(drift))}", flush=True)
@@ -3309,16 +3708,7 @@ def create_changelog_viewer(markdown: str, theme_name: str, parent=None) -> QTex
     viewer.setPalette(palette)
     viewer.setStyleSheet(
         f"QTextBrowser#changelogViewer {{ background: {background.name()}; color: {text.name()}; }}"
-        f"QScrollBar {{ background: {theme['surface']}; border: 1px solid {theme['border']}; }}"
-        "QScrollBar:vertical { width: 14px; } QScrollBar:horizontal { height: 14px; }"
-        f"QScrollBar::handle {{ background: {theme['muted']}; border-radius: 5px; margin: 2px; }}"
-        "QScrollBar::handle:vertical { min-height: 24px; }"
-        "QScrollBar::handle:horizontal { min-width: 24px; }"
-        f"QScrollBar::handle:hover {{ background: {theme['text']}; }}"
-        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-        "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
-        "QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }"
-        f"QAbstractScrollArea::corner {{ background: {theme['surface']}; }}"
+        + scrollbar_stylesheet(theme)
     )
     viewer.document().setDefaultStyleSheet(
         f"body {{ color: {text.name()}; }} a {{ color: {link.name()}; text-decoration: underline; }}"
@@ -3377,17 +3767,25 @@ class WindowTitleBar(QFrame):
 
     def mouseDoubleClickEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self.window()._toggle_maximized()
+            window = self.window()
+            if hasattr(window, "_toggle_maximized"):
+                window._toggle_maximized()
+            elif window.minimumSize() != window.maximumSize():
+                window.showNormal() if window.isMaximized() else window.showMaximized()
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, settings: QSettings | None = None) -> None:
         super().__init__()
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
-        self.settings = QSettings("MeshMill", "MeshMill")
+        self.settings = settings if settings is not None else QSettings("MeshMill", "MeshMill-FittedShell-Prototype")
+        self.recent_files_enabled = self.settings.value("files/recent_enabled", False, type=bool)
+        self.recent_files = self.settings.value("files/recent", [], type=list) if self.recent_files_enabled else []
+        if not self.recent_files_enabled:
+            self.settings.remove("files/recent")
         self.gpu_preference = str(
             self.settings.value("performance/gpu_preference", "system")
         )
@@ -3423,6 +3821,10 @@ class MainWindow(QMainWindow):
         )
         if self.appearance_theme_name not in APPEARANCE_THEMES:
             self.appearance_theme_name = DEFAULT_APPEARANCE
+        saved_order = self.settings.value("interface/toolbox_order", list(TOOLBOX_ORDER))
+        self.toolbox_order = (list(saved_order) if isinstance(saved_order, (list, tuple))
+                              and len(saved_order) == len(TOOLBOX_ORDER)
+                              and set(saved_order) == set(TOOLBOX_ORDER) else list(TOOLBOX_ORDER))
         self.font_size_position = max(
             0, min(4, self.settings.value("interface/font_size_position", 1, type=int))
         )
@@ -3519,7 +3921,7 @@ class MainWindow(QMainWindow):
             0, self.settings.value("performance/geometry_processes", 0, type=int)
         )
         self.startup_algorithm = str(
-            self.settings.value("optimization/startup_algorithm", "last")
+            self.settings.value("optimization/startup_algorithm", "auto")
         )
         self.last_algorithm = str(
             self.settings.value(
@@ -3623,8 +4025,10 @@ class MainWindow(QMainWindow):
         self.control_key_held = False
         self.saved_standard_views: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self.orientation_reference_basis: np.ndarray | None = None
+        self.export_calibration_transform: np.ndarray | None = None
         self.has_committed_optimization = False
         self.optimization_script_passes: list[dict[str, object]] = []
+        self.script_base_poly = None
         self.optimization_script_omissions: list[str] = []
         self.overview_mode = False
         self.tiled_mode = False
@@ -3709,9 +4113,14 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self.preview)
         self.navigation_timer = QTimer(self)
         self.navigation_timer.setInterval(16)
+        self.navigation_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.navigation_timer.timeout.connect(self._advance_navigation)
         self._navigation_steps = 0
         self._navigation_command = None
+        self._held_navigation_key = None
+        self._navigation_last_tick = None
+        self._navigation_hold_started = None
+        self._navigation_precision_steps = 0
         self.measure_pick_timer = QTimer(self)
         self.measure_pick_timer.setSingleShot(True)
         self.measure_pick_timer.setInterval(35)
@@ -3780,6 +4189,7 @@ class MainWindow(QMainWindow):
         controls.setFrameShape(QFrame.Shape.NoFrame)
         controls.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         controls.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        controls.verticalScrollBar().setSingleStep(32)
         controls.setFixedWidth(352)
         controls_content = QWidget(controls)
         self.controls_content = controls_content
@@ -3814,7 +4224,10 @@ class MainWindow(QMainWindow):
         brand_row.addWidget(brand_logo)
         panel.addLayout(brand_row)
 
-        self.open_button = QPushButton("Open STL…")
+        self.open_button = QPushButton("Open")
+        self.envelope_button = QPushButton("Cast")
+        self.envelope_button.setProperty("accent", True)
+        self.envelope_button.clicked.connect(self._create_envelope)
         self.open_button.setProperty("accent", True)
         self.open_button.setProperty("fileAction", True)
         self.open_button.clicked.connect(self.open_file)
@@ -3833,9 +4246,9 @@ class MainWindow(QMainWindow):
         self.cancel_preview_button.setProperty("quiet", True)
         self.cancel_preview_button.setEnabled(False)
         self.cancel_preview_button.setToolTip(
-            "Discard the optimized result and return to the original mesh."
+            "Discard the pending preview and keep the working mesh."
         )
-        self.cancel_preview_button.clicked.connect(self._cancel_optimized_preview)
+        self.cancel_preview_button.clicked.connect(self._cancel_workflow_preview)
         self.redo_button = QPushButton("Redo")
         self.redo_button.setProperty("quiet", True)
         self.redo_button.setEnabled(False)
@@ -3849,6 +4262,9 @@ class MainWindow(QMainWindow):
             button.setMinimumWidth(72)
             button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             history_row.addWidget(button)
+
+        self._toolbox_layout = panel
+        self._toolbox_sections = {}
 
         def tool_section(
             title_text: str, icon_name: str, tone: str
@@ -3876,11 +4292,100 @@ class MainWindow(QMainWindow):
             header.addStretch(1)
             layout.addLayout(header)
             panel.addWidget(frame)
+            self._toolbox_sections[title_text] = frame
             return layout, header
 
-        optimization_panel, _optimization_header = tool_section("OPTIMIZATION", "optimize", "optimization")
-        stats_panel, _stats_header = tool_section("STATS", "stats", "stats")
+        self._make_tool_section = tool_section
+        optimization_section, optimization_header = tool_section("OPTIMIZATION", "optimize", "optimization")
+        self.optimization_toggle = QToolButton()
+        self.optimization_toggle.setObjectName("sectionExpander")
+        self.optimization_toggle.setCheckable(True)
+        self.optimization_toggle.setArrowType(Qt.ArrowType.DownArrow)
+        self.optimization_toggle.setAccessibleName("Collapse Optimize")
+        optimization_header.addWidget(self.optimization_toggle)
+        self.optimization_body = QFrame()
+        optimization_panel = QVBoxLayout(self.optimization_body)
+        optimization_panel.setContentsMargins(0, 0, 0, 0)
+        optimization_panel.setSpacing(8)
+        optimization_section.addWidget(self.optimization_body)
+        self.optimization_toggle.toggled.connect(lambda expanded: self._toggle_tool_section("Optimize", expanded))
+        self.optimization_toggle.setChecked(True)
+        solidify_panel, solidify_header = tool_section("SOLIDIFY", "solidify", "optimization")
+        self.solidify_toggle = QToolButton()
+        self.solidify_toggle.setObjectName("sectionExpander")
+        self.solidify_toggle.setCheckable(True)
+        self.solidify_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.solidify_toggle.setAccessibleName("Expand Solidify")
+        solidify_header.addWidget(self.solidify_toggle)
+        self.solidify_body = QFrame()
+        solidify_form = QFormLayout(self.solidify_body)
+        self.solidify_form = solidify_form
+        solidify_form.setContentsMargins(0, 0, 0, 0)
+        self.solidify_method = ArrowComboBox()
+        from solidify import METHODS
+        self.solidify_method.addItems(METHODS)
+        self.solidify_method.setToolTip("Fill missing geometry while preserving measured surfaces; validate the completed solid before applying it.")
+        solidify_form.addRow("Method", self.solidify_method)
+        self.solidify_method.hide()
+        solidify_form.labelForField(self.solidify_method).hide()
+        from geometry_dimension_control import GeometryDimensionControl
+        self.solidify_gap = GeometryDimensionControl("solid-gap")
+        solidify_form.addRow("Gap bridging", self.solidify_gap)
+        self.solidify_quality = ArrowComboBox()
+        self.solidify_quality.addItems(["Draft", "Balanced", "Fine"])
+        self.solidify_quality.setCurrentText("Balanced")
+        solidify_form.addRow("Detail", self.solidify_quality)
+        self.solidify_info_row = QWidget()
+        info_layout = QHBoxLayout(self.solidify_info_row)
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(4)
+        self.solidify_info_labels = {}
+        for key, title in (("open_rims", "Open rims"), ("open_edges", "Open edges"), ("rim_length", "Rim length")):
+            label = QLabel(title + "\n?")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setProperty("qualityMetric", True)
+            label.setMinimumWidth(0)
+            info_layout.addWidget(label, 1)
+            self.solidify_info_labels[key] = label
+        solidify_form.addRow(self.solidify_info_row)
+        self._solidify_info_key = None
+        self._solidify_info_result = None
+        self._solidify_info_future = None
+        self.solidify_info_timer = QTimer(self)
+        self.solidify_info_timer.setInterval(80)
+        self.solidify_info_timer.timeout.connect(self._poll_solidify_info)
+        self.solidify_preview_button = QPushButton("Solidify")
+        self.solidify_preview_button.setProperty("accent", True)
+        self.solidify_preview_button.clicked.connect(self._preview_solidify)
+        self.solidify_preview_button.setToolTip("Create a solid preview for the selection, or for the whole mesh when nothing is selected.")
+        solidify_form.addRow(self.solidify_preview_button)
+        self.solidify_error = QLabel()
+        self.solidify_error.setWordWrap(True)
+        self.solidify_error.hide()
+        solidify_form.addRow(self.solidify_error)
+        self.solidify_body.hide()
+        solidify_panel.addWidget(self.solidify_body)
+        self.solidify_toggle.toggled.connect(lambda expanded: self._toggle_tool_section("Solidify", expanded))
+        imprint_panel, _imprint_header = tool_section("CAST", "imprint", "optimization")
+        imprint_panel.parentWidget().setProperty("imprintSection", True)
+        self.imprint_section_toggle = QToolButton()
+        self.imprint_section_toggle.setObjectName("sectionExpander")
+        self.imprint_section_toggle.setAccessibleName("Expand Cast")
+        self.imprint_section_toggle.setToolTip("Expand or collapse Cast")
+        self.imprint_section_toggle.setCheckable(True)
+        self.imprint_section_toggle.setChecked(False)
+        self.imprint_section_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.imprint_section_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.imprint_section_toggle.toggled.connect(self._toggle_imprint_section)
+        _imprint_header.addWidget(self.imprint_section_toggle)
+        self.imprint_body = QFrame()
+        self.imprint_body_layout = QVBoxLayout(self.imprint_body)
+        self.imprint_body_layout.setContentsMargins(0, 0, 0, 0)
+        self.imprint_body.hide()
+        imprint_panel.addWidget(self.imprint_body)
+        workflow_panel, _workflow_header = tool_section("ACTIONS", "actions", "optimization")
         general_panel, general_header = tool_section("GENERAL", "general", "general")
+        stats_panel, _stats_header = tool_section("STATS", "stats", "stats")
 
         self.file_label = ElidedPathLabel("No file loaded")
         self.file_label.setObjectName("fileCard")
@@ -3909,16 +4414,16 @@ class MainWindow(QMainWindow):
         stats_panel.addLayout(file_row)
 
         stats = QGridLayout()
-        stats.addWidget(field_label("Original triangles:", "Triangle count before the pending optimization is applied."), 0, 0)
+        stats.addWidget(field_label("Input triangles:", "Triangle count in the current working mesh."), 0, 0)
         self.original_count = QLabel("—")
         stats.addWidget(self.original_count, 0, 1)
-        stats.addWidget(field_label("Original vertices:", "Vertex count before the pending optimization is applied."), 1, 0)
+        stats.addWidget(field_label("Input vertices:", "Vertex count in the current working mesh."), 1, 0)
         self.original_vertices = QLabel("—")
         stats.addWidget(self.original_vertices, 1, 1)
-        stats.addWidget(field_label("Optimized triangles:", "Triangle count in the optimized result."), 2, 0)
+        stats.addWidget(field_label("Result triangles:", "Triangle count in the pending result, or an estimate for the optimization target."), 2, 0)
         self.preview_count = QLabel("—")
         stats.addWidget(self.preview_count, 2, 1)
-        stats.addWidget(field_label("Optimized vertices:", "Vertex count in the optimized result."), 3, 0)
+        stats.addWidget(field_label("Result vertices:", "Vertex count in the pending result, or an estimate for the optimization target."), 3, 0)
         self.preview_vertices = QLabel("—")
         stats.addWidget(self.preview_vertices, 3, 1)
         self.dimensions_caption = QLabel("Dimensions (mm):")
@@ -3940,17 +4445,17 @@ class MainWindow(QMainWindow):
         stats.addWidget(
             field_label(
                 "Reduction:",
-                "Percentage of the original STL triangles removed from the current mesh.",
+                "Triangle reduction relative to the current working mesh. A negative value means the result adds triangles.",
             ),
             6,
             0,
         )
         self.optimization_ratio = QLabel("—")
         stats.addWidget(self.optimization_ratio, 6, 1)
-        stats.addWidget(field_label("Original file:", "Size of the STL file opened from disk."), 7, 0)
+        stats.addWidget(field_label("Opened file:", "Size of the STL file opened from disk."), 7, 0)
         self.original_file_size = QLabel("—")
         stats.addWidget(self.original_file_size, 7, 1)
-        stats.addWidget(field_label("Estimated output:", "Estimated binary STL size at the current target."), 8, 0)
+        stats.addWidget(field_label("Output size:", "Binary STL size of the pending result, or an estimate for the optimization target."), 8, 0)
         self.estimated_file_size = QLabel("—")
         stats.addWidget(self.estimated_file_size, 8, 1)
         for value in (
@@ -4120,7 +4625,7 @@ class MainWindow(QMainWindow):
             field_label("Display type", "Choose how mesh geometry and point density are drawn.")
         )
         display_row.addWidget(self.display_type, 1)
-        optimization_panel.addLayout(display_row)
+        workflow_panel.addLayout(display_row)
 
         units_row = QHBoxLayout()
         units_row.addWidget(
@@ -4135,7 +4640,7 @@ class MainWindow(QMainWindow):
         self.units.setCurrentText(self.default_units)
         self._units_changed(self.default_units)
         units_row.addWidget(self.units, 1)
-        optimization_panel.addLayout(units_row)
+        workflow_panel.addLayout(units_row)
 
         processing_row = QHBoxLayout()
         processing_row.addWidget(
@@ -4160,17 +4665,119 @@ class MainWindow(QMainWindow):
         processing_row.addWidget(self.processing_route, 1)
         optimization_panel.addLayout(processing_row)
 
-        self.processing_plan = QLabel("Processing: open a mesh to estimate time and quality")
-        self.processing_plan.setWordWrap(True)
-        self.processing_plan.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.processing_plan.setProperty("muted", True)
-        self.processing_plan.setToolTip(
-            "Estimates are based on matched reference runs. Average error measures overall "
-            "surface change. Peak error describes the higher-error end of the sampled surface."
-        )
-        optimization_panel.addWidget(self.processing_plan)
-        general_panel.addWidget(self.open_button)
-        general_panel.addWidget(self.reload_button)
+        self._processing_help = self.processing_route.toolTip()
+        open_row = QHBoxLayout()
+        open_row.setSpacing(5)
+        open_row.addWidget(self.open_button, 1)
+        self.recent_files_button = QPushButton(self.controls_content)
+        self.recent_files_button.setObjectName("openRecentFiles")
+        self.recent_files_button.setAccessibleName("Open recent files")
+        self.recent_files_button.setToolTip("Open a recent STL file.")
+        self.recent_files_button.setFixedWidth(34)
+        self.recent_files_button.setStyleSheet("padding: 0px;")
+        self._set_theme_icon(self.recent_files_button, "recent")
+        self.recent_files_menu = QMenu(self.recent_files_button)
+        self.recent_files_button.clicked.connect(self._show_recent_files)
+        self.recent_files_button.setVisible(self.recent_files_enabled)
+        open_row.addWidget(self.recent_files_button)
+        workflow_panel.addLayout(open_row)
+        self.imprint_form = QFormLayout()
+        self.imprint_output = ArrowComboBox()
+        self.imprint_output.addItems(["Clamshell", "Envelope"])
+        self.imprint_output.setToolTip("Clamshell creates a hollow housing around the mesh, with an optional split. Envelope creates only the offset outer surface.")
+        self.imprint_form.addRow("Output", self.imprint_output)
+        self.imprint_prepare_solid = QCheckBox("Prepare with Solidify")
+        self.imprint_prepare_solid.setChecked(True)
+        self.imprint_prepare_solid.setToolTip("Fill missing scan geometry before building the clamshell. Closed solids skip this step.")
+        self.imprint_form.addRow("Source", self.imprint_prepare_solid)
+        self.imprint_prepare_solid.toggled.connect(self._imprint_settings_changed)
+
+        from geometry_dimension_control import GeometryDimensionControl
+        self.imprint_offset = GeometryDimensionControl("offset")
+        self.imprint_form.addRow("Clearance", self.imprint_offset)
+        surface_pick_row = QHBoxLayout()
+        self.imprint_pick_surface = QPushButton("Pick surface")
+        self.imprint_pick_surface.setCheckable(True)
+        self.imprint_pick_surface.setToolTip("Click a known exterior surface to guide detection of its continuous surface sheet. Add picks where an incomplete scan is detected incorrectly.")
+        self.imprint_pick_surface.toggled.connect(self._toggle_imprint_surface_pick)
+        surface_pick_row.addWidget(self.imprint_pick_surface)
+        self.imprint_clear_picks = QPushButton("Clear picks")
+        self.imprint_clear_picks.clicked.connect(self._clear_imprint_surface_picks)
+        surface_pick_row.addWidget(self.imprint_clear_picks)
+        self.imprint_form.addRow("Detection", surface_pick_row)
+        self._imprint_surface_seeds = []
+        self._imprint_surface_seed_source = None
+        self.imprint_shape = ArrowComboBox()
+        self.imprint_shape.addItems(["Blob", "Box"])
+        self.imprint_form.addRow("Outer shape", self.imprint_shape)
+        self.imprint_wall = GeometryDimensionControl("wall")
+        self.imprint_bridge = GeometryDimensionControl("gap")
+        self.imprint_form.addRow("Wall thickness", self.imprint_wall)
+        self.imprint_form.addRow("Gap bridging", self.imprint_bridge)
+        self.imprint_wall.setToolTip("Auto scales the clamshell wall to the mesh. Drag the slider to set a manual thickness.")
+        self.imprint_bridge.setToolTip("Auto scales gap bridging to the mesh. Manual zero leaves bridging off. Missing scan regions remain unknown space.")
+        self.imprint_detail = QSlider(Qt.Orientation.Horizontal)
+        self.imprint_detail.setRange(0, 4)
+        self.imprint_detail.setValue(2)
+        self.imprint_detail.setSingleStep(1)
+        self.imprint_detail.setTickInterval(1)
+        self.imprint_detail.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.imprint_detail.setToolTip("Left: coarser and faster. Right: finer detail. Actual resolution adapts to available memory.")
+        self.imprint_form.addRow("Detail", self.imprint_detail)
+        self.imprint_split = ArrowComboBox()
+        self.imprint_split.addItems(["Unsplit", "Current view", "X", "Y", "Z", "Custom"])
+        self.imprint_form.addRow("Split", self.imprint_split)
+        self.imprint_body_layout.addLayout(self.imprint_form)
+        self.imprint_error = QLabel()
+        self.imprint_error.setWordWrap(True)
+        self.imprint_error.hide()
+        self.imprint_body_layout.addWidget(self.imprint_error)
+        for widget in (self.imprint_output, self.imprint_shape, self.imprint_split):
+            widget.currentIndexChanged.connect(self._imprint_settings_changed)
+        for widget in (self.imprint_offset, self.imprint_wall, self.imprint_bridge, self.imprint_detail):
+            widget.valueChanged.connect(self._imprint_settings_changed)
+        self.envelope_button.setText("Cast")
+        self.imprint_body_layout.addWidget(self.envelope_button)
+        self.envelope_controls = QFrame()
+        envelope_layout = QVBoxLayout(self.envelope_controls)
+        envelope_layout.setContentsMargins(0, 0, 0, 0)
+        envelope_row = QHBoxLayout()
+        envelope_layout.addLayout(envelope_row)
+        self.envelope_visible = QCheckBox("Overlay")
+        self.envelope_visible.setChecked(True)
+        self.envelope_visible.toggled.connect(self._update_envelope_overlay)
+        envelope_row.addWidget(self.envelope_visible)
+        self.envelope_original_visible = QCheckBox("Original")
+        self.envelope_original_visible.setChecked(True)
+        self.envelope_original_visible.setToolTip("Show the source mesh behind the cast preview.")
+        self.envelope_original_visible.toggled.connect(self._update_envelope_overlay)
+        envelope_row.addWidget(self.envelope_original_visible)
+        self.envelope_separate_halves = QCheckBox("Separate parts")
+        self.envelope_separate_halves.setToolTip("Separate the halves physically for selection and export. Turning this off returns them to their assembled positions, where STL importers may join touching faces.")
+        self.envelope_separate_halves.toggled.connect(self._update_envelope_overlay)
+        self.envelope_separate_halves.hide()
+        envelope_layout.addWidget(self.envelope_separate_halves)
+        self.envelope_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.envelope_opacity.setRange(1, 30)
+        self.envelope_opacity.setValue(15)
+        self.envelope_opacity.setToolTip("Cast preview opacity")
+        self.envelope_opacity.valueChanged.connect(self._update_envelope_overlay)
+        envelope_row.addWidget(self.envelope_opacity, 1)
+        self.envelope_controls.hide()
+        self.imprint_body_layout.addWidget(self.envelope_controls)
+        self.envelope_stats = QLabel()
+        self.envelope_stats.setWordWrap(True)
+        self.envelope_stats.hide()
+        self.imprint_body_layout.addWidget(self.envelope_stats)
+        self._imprint_settings_changed()
+        self.solidify_method.currentIndexChanged.connect(self._solidify_settings_changed)
+        self.solidify_quality.currentIndexChanged.connect(self._solidify_settings_changed)
+        self.solidify_gap.valueChanged.connect(self._solidify_settings_changed)
+        self._solidify_settings_changed()
+        self.units.currentTextChanged.connect(lambda _unit: self._refresh_solidify_info()
+                                              if self.solidify_toggle.isChecked() else None)
+        self.units.currentTextChanged.connect(lambda _unit: self._refresh_workflow_actions())
+        workflow_panel.addWidget(self.reload_button)
 
         # Selection removal stays keyboard-driven (Delete and Escape). Keep internal controls for
         # shared enabled-state handling without adding redundant disabled buttons to the toolbox.
@@ -4182,7 +4789,7 @@ class MainWindow(QMainWindow):
         self.clear_selection_button.setEnabled(False)
         self.clear_selection_button.clicked.connect(self._clear_selection)
         self.clear_selection_button.hide()
-        optimization_panel.addWidget(self.history_actions)
+        workflow_panel.addWidget(self.history_actions)
 
         self.toggle_mesh_button = QPushButton("Show original")
         self.toggle_mesh_button.setEnabled(False)
@@ -4200,13 +4807,40 @@ class MainWindow(QMainWindow):
         comparison_row.addWidget(self.toggle_mesh_button)
         comparison_row.addWidget(self.previous_mesh_button)
 
-        self.status = QLabel("Open STL")
+        self.status = QLabel("Open a mesh")
         self.status.setWordWrap(True)
         self.status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.status.setProperty("muted", True)
 
         optimization_panel.addWidget(self.preview_button)
-        optimization_panel.addWidget(self.comparison_actions)
+        self.workflow_preview_actions = QFrame()
+        preview_actions_row = QHBoxLayout(self.workflow_preview_actions)
+        preview_actions_row.setContentsMargins(0, 0, 0, 0)
+        self.workflow_apply_button = QPushButton("Apply preview")
+        self.workflow_apply_button.setProperty("accent", True)
+        self.workflow_apply_button.clicked.connect(self._apply_workflow_preview)
+        self.workflow_save_preview_button = QPushButton("Save preview")
+        self.workflow_save_preview_button.clicked.connect(self._save_workflow_preview)
+        self.workflow_save_preview_button.setToolTip("Export the preview without replacing the working mesh.")
+        preview_actions_row.addWidget(self.workflow_apply_button)
+        preview_actions_row.addWidget(self.workflow_save_preview_button)
+        workflow_panel.addWidget(self.workflow_preview_actions)
+        self.workflow_solid_summary = QWidget()
+        solid_summary_row = QHBoxLayout(self.workflow_solid_summary)
+        solid_summary_row.setContentsMargins(0, 0, 0, 0)
+        solid_summary_row.setSpacing(4)
+        self.solidify_result_labels = {}
+        for key, title in (("retained_percent", "Surface kept"), ("rebuilt_percent", "Rebuilt area"), ("open_edges", "Open edges")):
+            label = QLabel(title + "\n?")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setProperty("qualityMetric", True)
+            label.setMinimumWidth(0)
+            solid_summary_row.addWidget(label, 1)
+            self.solidify_result_labels[key] = label
+        workflow_panel.addWidget(self.workflow_solid_summary)
+        self.workflow_solid_summary.hide()
+
+        workflow_panel.addWidget(self.comparison_actions)
 
         self.save_button = QPushButton("Save current mesh…")
         self.save_button.setProperty("accent", True)
@@ -4218,14 +4852,15 @@ class MainWindow(QMainWindow):
         self.generate_script_button.setProperty("quiet", True)
         self.generate_script_button.setEnabled(False)
         self.generate_script_button.setToolTip(
-            "Create a non-interactive PowerShell script that repeats committed full-mesh "
-            "optimization passes with their applied algorithm, Draft/Balanced/Fine quality, and GPU settings."
+            "Repeat committed Optimize, Solidify and Cast operations without opening the UI. "
+            "Selections and crops use an edited-mesh input checkpoint."
         )
         self.generate_script_button.clicked.connect(self._generate_optimization_script)
         self._set_theme_icon(self.generate_script_button, "copy")
-        general_panel.addWidget(self.generate_script_button)
-        general_panel.addWidget(self.save_button)
+        workflow_panel.addWidget(self.generate_script_button)
+        workflow_panel.addWidget(self.save_button)
         self._update_action_row_visibility()
+        self._reorder_tool_sections()
         info_row = QHBoxLayout()
         self.settings_button = QPushButton("Settings")
         self.settings_button.setProperty("quiet", True)
@@ -4277,6 +4912,7 @@ class MainWindow(QMainWindow):
             self.vtk_widget, self._show_loupe, self._crop_interaction, self._queue_keyboard_navigation,
             self._measurement_interaction,
         )
+        self.navigation_style._surface_pick_callback = self._handle_imprint_surface_pick
         self.measure_picker = vtkHardwarePicker()
         self.keyboard_picker = vtkHardwarePicker()
         self.navigation_style.invert_horizontal = self.mouse_horizontal
@@ -4321,13 +4957,93 @@ class MainWindow(QMainWindow):
         )
 
     def eventFilter(self, watched, event) -> bool:
+        if (event.type() in (QEvent.Type.WindowActivate, QEvent.Type.WindowDeactivate)
+                and isinstance(watched, QWidget)):
+            header_name = "appHeader" if watched is self else "dialogTitleBar"
+            header = watched.findChild(WindowTitleBar, header_name)
+            if header is not None:
+                header.setProperty("windowActive", event.type() == QEvent.Type.WindowActivate)
+                header.style().unpolish(header)
+                header.style().polish(header)
+                for label in header.findChildren(QLabel):
+                    label.style().unpolish(label)
+                    label.style().polish(label)
+                header.update()
+        if event.type() in (QEvent.Type.Polish, QEvent.Type.Show) and isinstance(watched, QDialog):
+            owner = watched.parentWidget()
+            while owner is not None and owner is not self:
+                owner = owner.parentWidget()
+            if owner is self:
+                if event.type() == QEvent.Type.Polish:
+                    self._install_dialog_title_bar(watched)
+                QTimer.singleShot(0, watched, lambda: self._apply_native_title_bar(
+                    appearance_theme(self.appearance_theme_name), watched
+                ))
+        if (event.type() == QEvent.Type.MouseButtonPress and isinstance(watched, QWidget)
+                and event.button() == Qt.MouseButton.LeftButton):
+            dialog = watched.window()
+            if (isinstance(dialog, QDialog) and dialog.property("themedCaption")
+                    and not dialog.isMaximized()):
+                point = dialog.mapFromGlobal(event.globalPosition().toPoint())
+                edges = Qt.Edge(0)
+                if point.x() < 5:
+                    edges |= Qt.Edge.LeftEdge
+                elif point.x() >= dialog.width() - 5:
+                    edges |= Qt.Edge.RightEdge
+                if point.y() < 5:
+                    edges |= Qt.Edge.TopEdge
+                elif point.y() >= dialog.height() - 5:
+                    edges |= Qt.Edge.BottomEdge
+                if edges and dialog.windowHandle() and dialog.windowHandle().startSystemResize(edges):
+                    return True
+        controls = getattr(self, "controls_widget", None)
+        in_toolbox = (controls is not None and isinstance(watched, QWidget)
+                      and (watched is controls or controls.isAncestorOf(watched)))
+        if in_toolbox and (
+            event.type() in (QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.LayoutRequest)
+            or (watched is controls.viewport() and event.type() == QEvent.Type.Resize)
+        ):
+            self._queue_toolbox_scroll_refresh()
+        if (controls is not None and watched is controls.verticalScrollBar()
+                and event.type() == QEvent.Type.MouseButtonPress):
+            self._refresh_toolbox_scroll_range()
+        if watched is getattr(self, "vtk_widget", None) and self._handle_imprint_plane_drag(event):
+            return True
+        if event.type() == QEvent.Type.Wheel and in_toolbox:
+            # Scroll the toolbox over its fields as well as its empty background.
+            # An open combo popup retains its normal item selection behavior.
+            popup = QApplication.activePopupWidget()
+            if popup is None:
+                self._refresh_toolbox_scroll_range()
+                bar = controls.verticalScrollBar()
+                if bar.maximum() > bar.minimum():
+                    pixel_delta = event.pixelDelta().y()
+                    delta = (float(pixel_delta) if pixel_delta else
+                             event.angleDelta().y() * bar.singleStep() * 3 / 120.0)
+                    remainder = getattr(self, "_toolbox_wheel_remainder", 0.0) + delta
+                    steps = int(remainder)
+                    self._toolbox_wheel_remainder = remainder - steps
+                    bar.setValue(bar.value() - steps)
+                    event.accept()
+                    return True
         if (event.type() == QEvent.Type.MouseButtonPress
                 and event.button() == Qt.MouseButton.LeftButton
                 and isinstance(watched, QWidget) and watched.window() is self
+                and not in_toolbox
                 and not self.isMaximized() and not self.isFullScreen()):
             edges = self._window_resize_edges(self.mapFromGlobal(event.globalPosition().toPoint()))
             if (edges and self.windowHandle() is not None
                     and self.windowHandle().startSystemResize(edges)):
+                return True
+        if (watched is self.vtk_widget and event.type() == QEvent.Type.MouseButtonDblClick
+                and event.button() == Qt.MouseButton.LeftButton and hasattr(self, "lathe")):
+            render_width, render_height = self.vtk_widget.GetRenderWindow().GetSize()
+            position = event.position()
+            probe_position = (
+                position.x()*render_width/max(1,self.vtk_widget.width()),
+                (self.vtk_widget.height()-position.y()-1)*render_height/max(1,self.vtk_widget.height()),
+            )
+            if self.lathe.delete_probe(probe_position):
                 return True
         if (watched is self.vtk_widget and event.type() == QEvent.Type.MouseButtonDblClick
                 and event.button() == Qt.MouseButton.LeftButton
@@ -4340,6 +5056,12 @@ class MainWindow(QMainWindow):
                       /max(1, self.vtk_widget.height())),
             ))
             return True
+        if (event.type() == QEvent.Type.ApplicationDeactivate
+                or (event.type() == QEvent.Type.WindowDeactivate and watched is self)):
+            self._stop_keyboard_navigation()
+        if (event.type() == QEvent.Type.KeyRelease and not event.isAutoRepeat()
+                and event.key() == self._held_navigation_key):
+            self._stop_keyboard_navigation()
         if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Control:
             self.control_key_held = True
         elif event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_Control or event.type() == QEvent.Type.ApplicationDeactivate:
@@ -4365,6 +5087,18 @@ class MainWindow(QMainWindow):
             or not self.isActiveWindow()
         ):
             return super().eventFilter(watched, event)
+
+        if (event.key() == Qt.Key.Key_Space and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                and hasattr(self, "lathe") and self.lathe.button.isChecked()
+                and not self.lathe.calibration_locked and not self.busy):
+            focus = QApplication.focusWidget()
+            editing = focus is not None and any(focus.inherits(name) for name in
+                ("QLineEdit", "QTextEdit", "QPlainTextEdit", "QAbstractSpinBox", "QComboBox"))
+            if not editing:
+                if event.type() == QEvent.Type.KeyPress and not event.isAutoRepeat():
+                    self.lathe.set_spin(not self.lathe.timer.isActive())
+                event.accept()
+                return True
 
         modifiers = event.modifiers()
         raw_modifiers = int(modifiers.value)
@@ -4424,11 +5158,33 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.Type.ShortcutOverride:
             event.accept()
             return True
+        if action in navigation_actions:
+            if event.isAutoRepeat() and self._held_navigation_key == event.key():
+                event.accept()
+                return True
+            self._held_navigation_key = event.key()
+        else:
+            self._stop_keyboard_navigation()
         callback()
         event.accept()
         return True
 
     def _update_action_row_visibility(self) -> None:
+        self._refresh_workflow_actions()
+        if not self.busy:
+            self.undo_button.setEnabled(bool(self.undo_stack))
+            self.redo_button.setEnabled(bool(self.redo_stack))
+            preview = self.preview_poly is not None and self.preview_poly is not self.source_poly
+            self.toggle_mesh_button.setEnabled(preview)
+            self.toggle_mesh_button.setText("Show optimized" if self.showing_original else "Show original")
+            previous = self.undo_stack[-1].poly if self.undo_stack else None
+            current = self.source_poly if self.showing_original or not preview else self.preview_poly
+            self.previous_mesh_button.setEnabled(previous is not None and previous is not current)
+            self.previous_mesh_button.setText("Show current" if self.showing_previous else "Show previous")
+            for name in ("undo_button", "redo_button", "toggle_mesh_button", "previous_mesh_button"):
+                button = getattr(self, name, None)
+                if button is not None:
+                    button.setVisible(button.isEnabled())
         if hasattr(self, "history_actions"):
             self.history_actions.setVisible(
                 any(
@@ -4454,12 +5210,84 @@ class MainWindow(QMainWindow):
             if button is not None:
                 button.setVisible(button.isEnabled())
 
+    def _refresh_workflow_actions(self):
+        self._refresh_solidify_availability()
+        if not hasattr(self, "workflow_preview_actions") or getattr(self, "_refreshing_workflow", False):
+            return
+        self._refreshing_workflow = True
+        try:
+            imprint = getattr(self, "_envelope_poly", None) is not None
+            solid = getattr(self, "_solidify_preview_context", None) is not None
+            preview = self.preview_poly is not None and self.preview_poly is not self.source_poly
+            pending = imprint or preview
+            label = "cast" if imprint else "solid" if solid else "optimization"
+            ready = (getattr(self, "_envelope_settings_key", None) == self._imprint_preview_settings_key()
+                     if imprint else bool(preview and self.pass_ready))
+            self.workflow_preview_actions.setVisible(pending)
+            report = getattr(self, "_solidify_preview_context", None)
+            completion = report.get("completion") if report is not None and not imprint else None
+            self.workflow_solid_summary.setVisible(completion is not None)
+            if completion is not None:
+                self.solidify_result_labels["retained_percent"].setText(f"Surface kept\n{completion['retained_percent']:.2f}%")
+                self.solidify_result_labels["retained_percent"].setToolTip(
+                    f"{fmt_count(completion['retained_faces'])} of {fmt_count(completion['source_faces'])} measured triangles remain at STL precision. Percentage is weighted by measured surface area, not triangle count. It does not measure accuracy of reconstructed gaps.")
+                self.solidify_result_labels["rebuilt_percent"].setText(f"Rebuilt area\n{completion['rebuilt_percent']:.2f}%")
+                unit = self.units.currentText()
+                area = completion['added_area'] / UNIT_MM[unit] ** 2
+                self.solidify_result_labels["rebuilt_percent"].setToolTip(
+                    f"{area:.3f} {unit}? of new surface, {fmt_count(completion['added_faces'])} triangles. Percentage of the completed surface reconstructed rather than measured. The scan cannot reveal the true missing shape.")
+                self.solidify_result_labels["open_edges"].setText(f"Open edges\n{fmt_count(completion['open_edges'])}")
+                self.solidify_result_labels["open_edges"].setToolTip("Boundary edges remaining in the solidified region. Zero means no open borders; the Solidify operation also validates intersections and topology before returning a result.")
+            self.workflow_apply_button.setText(f"Apply {label}")
+            self.workflow_apply_button.setEnabled(ready and not self.busy)
+            self.workflow_save_preview_button.setEnabled(ready and not self.busy)
+            self.cancel_preview_button.setVisible(pending)
+            self.cancel_preview_button.setEnabled(pending and not self.busy)
+        finally:
+            self._refreshing_workflow = False
+
+    def _apply_workflow_preview(self, _checked=False):
+        if getattr(self, "_envelope_poly", None) is not None:
+            self._replace_with_envelope()
+        else:
+            self._apply_optimized_pass()
+        self._update_action_row_visibility()
+
+    def _cancel_workflow_preview(self, _checked=False):
+        if self.busy:
+            return
+        if getattr(self, "_envelope_poly", None) is not None:
+            self._clear_envelope()
+        elif getattr(self, "_solidify_preview_context", None) is not None:
+            self._cancel_solidify_preview()
+        else:
+            self._cancel_optimized_preview()
+        self._update_action_row_visibility()
+
+    def _save_workflow_preview(self, _checked=False):
+        if self.busy or not self.workflow_save_preview_button.isEnabled():
+            return
+        if getattr(self, "_envelope_poly", None) is not None:
+            self._save_envelope()
+            return
+        if self.preview_poly is None or self.preview_poly is self.source_poly:
+            return
+        directory = self.source_path.parent if self.source_path else Path(self._file_open_directory())
+        from mesh_export_ui import choose_mesh_export
+        choice = choose_mesh_export(self, "Save preview", directory / "preview.stl", self.preview_poly)
+        if choice is None:
+            return
+        destination, merge = choice
+        self._export_meshes([(destination, self.preview_poly)], merge)
+
     def _sync_modified_mesh_actions(self) -> None:
         """Keep save and reload availability tied to the current history state."""
         available = bool(self.mesh_modified and self.source_poly is not None)
         self.save_button.setEnabled(available)
         self.reload_button.setEnabled(available)
-        self.generate_script_button.setEnabled(available and bool(self.optimization_script_passes))
+        self.generate_script_button.setEnabled(available and bool(
+            self.optimization_script_passes or self.script_base_poly is not None
+            or self.export_calibration_transform is not None))
         self._update_action_row_visibility()
 
     def _toggle_full_screen(self) -> None:
@@ -4654,6 +5482,13 @@ class MainWindow(QMainWindow):
         graph = getattr(self, "geometry_activity_graph", None)
         if graph is not None:
             graph.apply_appearance(self.appearance_theme_name)
+            for resource, bar in getattr(self, 'metric_bars', {}).items():
+                series = 'gpu' if resource in ('gpu', 'vram') else 'cpu'
+                color = graph.plot_colors[series].name()
+                bar.setStyleSheet(
+                    'QProgressBar { text-align: right; } '
+                    f'QProgressBar::chunk {{ background: {color}; }}'
+                )
             history_palette = self.metrics_history_scroll.viewport().palette()
             history_palette.setColor(QPalette.ColorRole.Window, QColor(theme["panel"]))
             history_palette.setColor(QPalette.ColorRole.Base, QColor(theme["panel"]))
@@ -4842,18 +5677,71 @@ class MainWindow(QMainWindow):
                 f"QFrame {{ border: 3px solid {theme['accent']}; border-radius: 180px; background: #080b10; }}"
             )
 
-    def _apply_native_title_bar(self, theme: dict[str, str]) -> None:
-        """Keep the Windows caption aligned with the selected application appearance."""
+    def _install_dialog_title_bar(self, dialog: QDialog) -> None:
+        if dialog.property("themedCaption") or dialog.layout() is None:
+            return
+        dialog.setProperty("themedCaption", True)
+        dialog.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        header = WindowTitleBar(dialog)
+        header.setObjectName("dialogTitleBar")
+        header.setProperty("windowActive", dialog.isActiveWindow())
+        row = QHBoxLayout(header)
+        row.setContentsMargins(10, 0, 0, 0)
+        row.setSpacing(8)
+        icon = QLabel(header)
+        icon.setPixmap(self.windowIcon().pixmap(18, 18))
+        icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        row.addWidget(icon)
+        title = QLabel(dialog.windowTitle(), header)
+        title.setObjectName("dialogCaptionText")
+        title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        dialog.windowTitleChanged.connect(title.setText)
+        row.addWidget(title, 1)
+        close = QPushButton(header)
+        close.setObjectName("dialogCaptionClose")
+        close.setAccessibleName("Close")
+        close.setToolTip("Close")
+        close.setAutoDefault(False)
+        close.clicked.connect(dialog.close)
+        row.addWidget(close)
+        dialog.layout().setMenuBar(header)
+        header.setMinimumHeight(max(34, self._font_pixel_size() + 18))
+        self._style_dialog_title_bar(dialog, appearance_theme(self.appearance_theme_name))
+
+    def _style_dialog_title_bar(self, dialog: QWidget, theme: dict[str, str]) -> None:
+        header = dialog.findChild(WindowTitleBar, "dialogTitleBar")
+        if header is None:
+            return
+        header.setStyleSheet(
+            f"QFrame#dialogTitleBar {{background:{theme['window']};border:0;"
+            f"border-bottom:1px solid {theme['border']};border-radius:0;}}"
+            f"QFrame#dialogTitleBar QLabel {{color:{theme['text']};background:transparent;"
+            f"border:0;font-size:{self._font_pixel_size()}px;}}"
+            f"QPushButton#dialogCaptionClose {{background:transparent;border:0;border-radius:0;"
+            f"padding:0;min-width:38px;min-height:32px;}}"
+            "QPushButton#dialogCaptionClose:hover {background:#C42B1C;}"
+            f"QFrame#dialogTitleBar[windowActive='false'] {{background:{inactive_caption_color(theme)};}}"
+            f"QFrame#dialogTitleBar[windowActive='false'] QLabel {{color:{theme['muted']};}}"
+        )
+        close = header.findChild(QPushButton, "dialogCaptionClose")
+        close.setIcon(draw_ui_icon("caption-close", theme["text"]))
+        close.setIconSize(QSize(17, 17))
+
+    def _apply_native_title_bar(
+        self, theme: dict[str, str], target: QWidget | None = None
+    ) -> None:
+        """Style native captions without replacing standard window controls."""
         if os.name != "nt":
             return
         try:
             dark = int(self.appearance_theme_name == "Dark Focus")
             value = ctypes.c_int(dark)
-            hwnd = ctypes.c_void_p(int(self.winId()))
+            targets = [target] if target is not None else [
+                self, *[dialog for dialog in self.findChildren(QDialog) if dialog.isVisible()]
+            ]
             dwmapi = ctypes.WinDLL("dwmapi")
             # 20 is supported by current Windows 10 and Windows 11. Older versions simply
             # ignore it, leaving the normal native caption intact.
-            dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
             def colorref(hex_color: str) -> ctypes.c_uint:
                 color = QColor(hex_color)
                 return ctypes.c_uint(color.red() | (color.green() << 8) | (color.blue() << 16))
@@ -4861,10 +5749,14 @@ class MainWindow(QMainWindow):
             caption = colorref(theme["window"])
             text = colorref(theme["text"])
             border = colorref(theme["border"])
-            for attribute, native_color in ((35, caption), (36, text), (34, border)):
-                dwmapi.DwmSetWindowAttribute(
-                    hwnd, attribute, ctypes.byref(native_color), ctypes.sizeof(native_color)
-                )
+            for widget in targets:
+                self._style_dialog_title_bar(widget, theme)
+                hwnd = ctypes.c_void_p(int(widget.winId()))
+                dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
+                for attribute, native_color in ((35, caption), (36, text), (34, border)):
+                    dwmapi.DwmSetWindowAttribute(
+                        hwnd, attribute, ctypes.byref(native_color), ctypes.sizeof(native_color)
+                    )
         except (AttributeError, OSError, TypeError):
             pass
 
@@ -4886,6 +5778,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(no_matches)
         sections = []
         scroll = QScrollArea(dialog)
+        scroll.setObjectName("preferencesScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         content = QWidget(scroll)
@@ -5004,7 +5897,7 @@ class MainWindow(QMainWindow):
             open_mode.addItem(label, value)
         open_mode.setCurrentIndex(max(0, open_mode.findData(
             self.settings.value("files/open_mode", "last"))))
-        open_mode.setToolTip("Choose the starting folder for the Open STL dialog.")
+        open_mode.setToolTip("Choose the starting folder for the Open dialog.")
         form.addRow("File open mode", open_mode)
         open_folder_row = QWidget(dialog)
         open_folder_layout = QHBoxLayout(open_folder_row)
@@ -5023,6 +5916,13 @@ class MainWindow(QMainWindow):
         open_mode.currentIndexChanged.connect(
             lambda _: open_folder_row.setEnabled(open_mode.currentData() == "fixed"))
         form.addRow("Opening folder", open_folder_row)
+        recent_files_enabled = QCheckBox("Enable recent files menu", dialog)
+        recent_files_enabled.setObjectName("recentFilesEnabled")
+        recent_files_enabled.setChecked(self.recent_files_enabled)
+        recent_files_enabled.setToolTip(
+            "Show an icon beside Open and remember up to ten successfully opened files "
+            "on this computer. Off by default. Disabling clears this recent-file history.")
+        form.addRow("Recent files", recent_files_enabled)
         if platform.system().lower() == "windows":
             associate_stl = QPushButton("Choose default app…", dialog)
             associate_stl.setObjectName("stlAssociationSettings")
@@ -5044,6 +5944,33 @@ class MainWindow(QMainWindow):
             "tools, layout, or mesh behavior."
         )
         form.addRow("Theme", appearance)
+
+        order_editor = QWidget(dialog)
+        order_layout = QHBoxLayout(order_editor)
+        order_layout.setContentsMargins(0, 0, 0, 0)
+        section_order = QListWidget(order_editor)
+        section_order.setObjectName("toolboxOrder")
+        section_order.addItems(self.toolbox_order)
+        section_order.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        section_order.setFixedHeight(section_order.fontMetrics().height() * 7 + 12)
+        section_order.setCurrentRow(0)
+        section_order.setToolTip("Drag sections or use Move up and Move down. Active tool follows the expanded tool; Other tools contains the collapsed tools.")
+        order_layout.addWidget(section_order, 1)
+        order_buttons = QVBoxLayout()
+        def move_section(delta):
+            row = section_order.currentRow()
+            destination = row + delta
+            if 0 <= destination < section_order.count():
+                item = section_order.takeItem(row)
+                section_order.insertItem(destination, item)
+                section_order.setCurrentRow(destination)
+        for label, delta in (("Move up", -1), ("Move down", 1)):
+            button = QPushButton(label, order_editor)
+            button.clicked.connect(lambda _checked=False, step=delta: move_section(step))
+            order_buttons.addWidget(button)
+        order_buttons.addStretch(1)
+        order_layout.addLayout(order_buttons)
+        form.addRow("Toolbox order", order_editor)
 
         viewport_appearance = ArrowComboBox(dialog)
         viewport_appearance.addItem("Match theme", "match")
@@ -5594,12 +6521,19 @@ class MainWindow(QMainWindow):
             result = "− / +" if inverted else "+ / −"
             return f"Press ↑ / ↓   Zoom {result}"
 
+        from mesh_export_ui import readable_theme_color
+
+        input_theme = appearance_theme(self.appearance_theme_name)
+        input_accent = readable_theme_color(
+            input_theme["accent"], [input_theme["window"], input_theme["panel"]], input_theme["text"]
+        )
+
         def input_icon(input_kind: str, axis: str) -> QPixmap:
             pixmap = QPixmap(25, 23)
             pixmap.fill(Qt.GlobalColor.transparent)
             painter = QPainter(pixmap)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setPen(QPen(QColor("#334155"), 1.5))
+            painter.setPen(QPen(QColor(input_theme["text"]), 1.5))
             if input_kind == "Mouse":
                 painter.drawRoundedRect(QRect(7, 2, 11, 18), 5, 5)
                 painter.drawLine(12, 3, 12, 8)
@@ -5636,15 +6570,15 @@ class MainWindow(QMainWindow):
             icon.setToolTip(tooltip)
             diagram = QLabel(cell)
             diagram.setMinimumWidth(145)
-            diagram.setStyleSheet("color: #334155;")
+            diagram.setStyleSheet(f"color: {input_theme['text']};")
             diagram.setToolTip(tooltip)
 
             def refresh(value: bool) -> None:
                 diagram.setText(inversion_diagram(input_kind, axis, value))
                 diagram.setStyleSheet(
-                    "color: #2563FF; font-weight: 600;"
+                    f"color: {input_accent}; font-weight: 600;"
                     if value
-                    else "color: #334155;"
+                    else f"color: {input_theme['text']};"
                 )
 
             refresh(checked)
@@ -5722,10 +6656,14 @@ class MainWindow(QMainWindow):
             reset_all_requested["value"] = True
             open_mode.setCurrentIndex(open_mode.findData("last"))
             open_folder.clear()
+            recent_files_enabled.setChecked(False)
             automatic_updates.setChecked(False)
             auto_install_scope.setCurrentIndex(auto_install_scope.findData("maintenance"))
             language.setCurrentIndex(language.findData("system"))
             appearance.setCurrentIndex(appearance.findData(DEFAULT_APPEARANCE))
+            section_order.clear()
+            section_order.addItems(TOOLBOX_ORDER)
+            section_order.setCurrentRow(0)
             viewport_appearance.setCurrentIndex(
                 viewport_appearance.findData(DEFAULT_APPEARANCE)
             )
@@ -5745,7 +6683,7 @@ class MainWindow(QMainWindow):
             metrics_timeline.setCurrentIndex(metrics_timeline.findData(300))
             tools_side.setCurrentText("Right")
             default_units.setCurrentText("cm")
-            startup_algorithm.setCurrentIndex(startup_algorithm.findData("last"))
+            startup_algorithm.setCurrentIndex(startup_algorithm.findData("auto"))
             startup_quality.setCurrentIndex(startup_quality.findData("last"))
             gpu_preference.setCurrentIndex(gpu_preference.findData("system"))
             geometry_processes.setCurrentIndex(geometry_processes.findData(0))
@@ -5806,12 +6744,16 @@ class MainWindow(QMainWindow):
         self.locale_preference = str(language.currentData() or "system")
         self.settings.setValue("files/open_mode", open_mode.currentData())
         self.settings.setValue("files/open_folder", open_folder.text().strip())
+        self._set_recent_files_enabled(recent_files_enabled.isChecked())
         self.appearance_theme_name = str(
             appearance.currentData() or DEFAULT_APPEARANCE
         )
         self.viewport_appearance_name = str(
             viewport_appearance.currentData() or "match"
         )
+        self.toolbox_order = [section_order.item(i).text() for i in range(section_order.count())]
+        self.settings.setValue("interface/toolbox_order", self.toolbox_order)
+        self._reorder_tool_sections()
         self.custom_density_gradient_left = custom_gradient["left"]
         self.custom_density_gradient_right = custom_gradient["right"]
         self.viewport_overlay_visible = {
@@ -5832,7 +6774,7 @@ class MainWindow(QMainWindow):
         self.auto_install_scope = str(auto_install_scope.currentData() or "maintenance")
         self.locale_code = locale_manager.select(self._resolved_locale(self.locale_preference))
         self.default_units = default_units.currentText()
-        self.startup_algorithm = str(startup_algorithm.currentData() or "last")
+        self.startup_algorithm = str(startup_algorithm.currentData() or "auto")
         self.startup_quality = str(startup_quality.currentData() or "last")
         self.gpu_preference = str(gpu_preference.currentData() or "system")
         selected_cuda = next(
@@ -5953,14 +6895,14 @@ class MainWindow(QMainWindow):
             self.redo_button: "Redo one mesh action.",
             self.units: "Dimension display units.",
             self.target_display: "Target triangle count derived from the slider and Smart quality.",
-            self.preview_button: "Optimize the mesh or apply the completed result.",
+            self.preview_button: "Create an optimization preview using the current settings.",
             self.smart_quality: "Automatic target density: Draft 15%, Balanced 50%, Fine 75% maximum.",
             self.algorithm: "Mesh optimization algorithm.",
             self.slider: "Triangle target density.",
             self.display_type: "Choose shaded, wireframe, point, or color-mapped point-density display.",
             self.toggle_mesh_button: "Switch between the original and optimized meshes.",
             self.previous_mesh_button: "Switch between the current mesh and its previous undo state.",
-            self.save_button: "Save the current mesh as a binary STL.",
+            self.save_button: "Save the current mesh as STL, COLLADA, GLB, OBJ or PLY.",
             self.settings_button: "Open app settings.",
             self.version_label: (
                 "Click to check GitHub for a newer MeshMill release. "
@@ -5975,7 +6917,8 @@ class MainWindow(QMainWindow):
             ),
         }
         for widget, description in help_text.items():
-            widget.setToolTip(description)
+            if not widget.toolTip():
+                widget.setToolTip(description)
             widget.setMouseTracking(True)
         for widget in self.findChildren(QWidget):
             if widget.toolTip():
@@ -6049,7 +6992,11 @@ class MainWindow(QMainWindow):
         self.runtime_metric.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.runtime_metric.setToolTip(
             "Left: completed jobs and total processing time for this session. Right: the most "
-            "recent operation and time spent in its main stages."
+            "recent operation and time spent in its main stages. CPU/GPU totals count geometry inputs "
+            "processed by each analysis or reduction pass, including repeated previews. Bytes are "
+            "point and triangle array sizes, not file sizes, memory usage, or transfer traffic. "
+            "A mesh processed on both devices contributes to both totals. Cached results do not "
+            "add another pass. Totals reset when the app closes."
         )
         grid.addWidget(self.runtime_metric, 6, 0, 1, 4)
         self.geometry_activity_graph = GeometryActivityGraph(frame)
@@ -6190,6 +7137,7 @@ class MainWindow(QMainWindow):
             render_window.Render()
 
     def _position_viewport_overlays(self) -> None:
+        self._position_imprint_plane_tools()
         self._project_crop_outline()
         self._position_view_pad()
         self._position_orientation_overlays()
@@ -6272,6 +7220,14 @@ class MainWindow(QMainWindow):
         return (int(value.dwHighDateTime) << 32) | int(value.dwLowDateTime)
 
     def _update_system_metrics(self) -> None:
+        if hasattr(self, "runtime_metric"):
+            from geometry_workload import snapshot
+            geometry = " ? ".join(
+                f"{device} {fmt_count(v[0])} vertices / {fmt_count(v[1])} triangles / {fmt_bytes(v[2])}"
+                for device, v in snapshot().items()
+            )
+            tail = self.runtime_metric.text().split("Session:", 1)
+            self.runtime_metric.setText(geometry + ("  |  Session:" + tail[1] if len(tail) == 2 else ""))
         cpu = float(self.metric_bars["cpu"].value())
         gpu = float(self.metric_bars["gpu"].value())
         available_memory = available_physical_memory()
@@ -6323,27 +7279,44 @@ class MainWindow(QMainWindow):
                 if self.cuda_device_list
                 else None
             )
-            if cuda_sample is None:
+            native = None
+            try:
                 load, dedicated_bytes = self.gpu_counters.sample()
-            else:
+                native = self.gpu_counters.last_sample
+            except OSError:
+                if cuda_sample is None:
+                    raise
                 load, dedicated_bytes = cuda_sample
             gpu = load
             self.metric_bars["gpu"].setValue(round(load))
             self.metric_bars["gpu"].setFormat("%p% used")
-            self.metric_labels["gpu"].setText(
-                f"{load:.0f}% load  •  {100-load:.0f}% idle"
-            )
-            if self.vram_capacity_bytes > 0:
+            if native is not None:
+                self.metric_labels["gpu"].setText(
+                    f"3D {native['graphics']:.0f}% ? Compute {native['compute']:.0f}%"
+                    + (f" ? CUDA GPU {cuda_sample[0]:.0f}%" if cuda_sample is not None else ""))
+                self.metric_labels["gpu"].setToolTip(
+                    f"{native['name']}. Windows busiest-engine utilization on the adapter rendering MeshMill, including all applications. "
+                    f"MeshMill process: {native['process_load']:.1f}%. Rendering and geometry processing may use different adapters."
+                    + (f" Selected geometry GPU (NVIDIA): {cuda_sample[0]:.0f}%." if cuda_sample is not None else ""))
+                vram_capacity = native["capacity"]
+                self.metric_labels["vram"].setToolTip(f"Dedicated memory on {native['name']}, the adapter rendering MeshMill. Includes all applications on that adapter.")
+            else:
+                self.metric_labels["gpu"].setText(f"{load:.0f}% load ? NVIDIA fallback")
+                self.metric_labels["gpu"].setToolTip("NVIDIA utilization for the selected geometry GPU. Windows rendering-engine counters are unavailable; viewport activity may use another adapter.")
+                vram_capacity = self.vram_capacity_bytes
+                self.metric_labels["vram"].setToolTip("Dedicated memory on the selected NVIDIA geometry GPU. Windows rendering-adapter counters are unavailable.")
+            self.metric_bars["gpu"].setToolTip(self.metric_labels["gpu"].toolTip())
+            if vram_capacity > 0:
                 vram_percent = max(
                     0.0,
-                    min(100.0, 100.0 * dedicated_bytes / self.vram_capacity_bytes),
+                    min(100.0, 100.0 * dedicated_bytes / vram_capacity),
                 )
                 self.metric_bars["vram"].setValue(round(vram_percent))
                 self.metric_bars["vram"].setFormat("%p% used")
                 self.metric_labels["vram"].setText(
                     f"{fmt_bytes(round(dedicated_bytes))} used  •  "
-                    f"{fmt_bytes(max(0, self.vram_capacity_bytes - round(dedicated_bytes)))} free  •  "
-                    f"{fmt_bytes(self.vram_capacity_bytes)} total"
+                    f"{fmt_bytes(max(0, vram_capacity - round(dedicated_bytes)))} free  •  "
+                    f"{fmt_bytes(vram_capacity)} total"
                 )
             else:
                 self.metric_bars["vram"].setValue(0)
@@ -6514,7 +7487,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(22, 18, 22, 18)
         layout.setSpacing(8)
         self.loading_heading = QLabel("Preparing mesh")
-        self.loading_heading.setStyleSheet("font-size: 18px; font-weight: 700;")
+        self.loading_heading.setObjectName("loadingTitle")
         layout.addWidget(self.loading_heading)
         self.loading_file_label = QLabel("Reading STL…")
         self.loading_file_label.hide()
@@ -6624,15 +7597,17 @@ class MainWindow(QMainWindow):
             ]
         if title in {"Optimizing", "Optimizing selection"}:
             first = (
-                "Analyzing depth and density on GPU"
+                "Analyzing depth and density"
                 if self.algorithm.currentText() == DEPTH_DENSITY_ADAPTIVE_LABEL
-                else "Analyzing surface on GPU"
+                else "Analyzing surface"
                 if is_gpu_guided_algorithm(self.algorithm.currentText())
                 else "Reducing mesh topology"
             )
             return list(dict.fromkeys([first, "Reducing mesh topology", "Finishing topology and surface", *result_analysis]))
         if title == "Optimizing tiles":
             return ["Optimizing tiles", "Assembling optimized mesh", "Loading optimized mesh", *result_analysis]
+        if title == "Exporting":
+            return ["Preparing export", "Finding planar faces", "Merging planar faces", "Writing geometry"]
         return ["Preparing mesh", title]
 
     def _reset_operation_steps(self, title: str) -> None:
@@ -6753,8 +7728,14 @@ class MainWindow(QMainWindow):
                         f"{self._runtime_category_short_name(name)} {seconds:.1f}s"
                     )
             detail = "  •  ".join(last_parts) if last_parts else "No measurable stages"
+            from geometry_workload import snapshot
+            workload = snapshot()
+            geometry = " ? ".join(
+                f"{device} {fmt_count(values[0])} vertices / {fmt_count(values[1])} triangles / {fmt_bytes(values[2])}"
+                for device, values in workload.items()
+            )
             self.runtime_metric.setText(
-                f"Session: {self.runtime_operation_count} jobs • {self.runtime_total_seconds:.1f}s  |  "
+                f"{geometry}  |  Session: {self.runtime_operation_count} jobs • {self.runtime_total_seconds:.1f}s  |  "
                 f"Latest: {self.last_operation_name} {total:.1f}s • {detail}"
             )
         self.operation_runtime_started_at = 0.0
@@ -6775,6 +7756,10 @@ class MainWindow(QMainWindow):
                 "Scanning QEM triangles", "Checking QEM boundaries",
             } else stage
         )
+        if stage.startswith("Surface probes:"):
+            canonical_stage = "Surface probes"
+        elif stage == "Building CPU ray index":
+            canonical_stage = "Building ray index"
         if canonical_stage not in self.operation_steps:
             self.operation_steps.insert(self.operation_step_index, canonical_stage)
         self.operation_step_index = self.operation_steps.index(canonical_stage)
@@ -6826,8 +7811,8 @@ class MainWindow(QMainWindow):
             if stage and stage != self.operation_progress_stage:
                 self.operation_progress_stage = stage
                 details = {
-                    "Analyzing surface on GPU": "Surface analysis",
-                    "Analyzing depth and density on GPU": "Depth and density analysis",
+                    "Analyzing surface": "Surface analysis",
+                    "Analyzing depth and density": "Depth and density analysis",
                     "Reducing mesh topology": "Reducing topology",
                     "Finishing topology and surface": "Finishing reduction",
                     "Preparing result analysis": "Preparing analysis",
@@ -6867,7 +7852,13 @@ class MainWindow(QMainWindow):
             self.loading_progress.setFormat(f"GPU setup  •  {elapsed:.1f} s elapsed")
 
     def _set_controls_busy(self, busy: bool) -> None:
-        interactive_types = (QPushButton, QCheckBox, QComboBox, QSpinBox, QSlider)
+        split_widget = getattr(self, "_imprint_split_widget", None)
+        if split_widget is not None:
+            split_widget.SetProcessEvents(not busy and not self.imprint_pick_surface.isChecked()
+                                          and getattr(self, "_imprint_plane_mode", "Rotate") == "Move")
+        if hasattr(self, "imprint_plane_tools"):
+            self.imprint_plane_tools.setEnabled(not busy)
+        interactive_types = (QPushButton, QCheckBox, QComboBox, QSpinBox, QDoubleSpinBox, QSlider)
         if busy:
             self._busy_control_states = {
                 widget: widget.isEnabled()
@@ -6905,6 +7896,8 @@ class MainWindow(QMainWindow):
             "selection_base_target": self.selection_base_target,
             "preview_dirty": self.preview_dirty,
             "pass_ready": self.pass_ready,
+            "quality_metrics": getattr(self, "_last_quality_metrics", None),
+            "quality_measured": getattr(self, "_last_quality_measured", False),
             "button_states": {
                 widget: widget.isEnabled()
                 for widget in (
@@ -6993,8 +7986,11 @@ class MainWindow(QMainWindow):
             for actor in (self.source_actor, self.simplified_actor):
                 if actor is not None:
                     self._set_actor_display_mode(actor)
+            self._update_quality_metrics(snapshot["quality_metrics"], measured=snapshot["quality_measured"])
+            self._update_estimated_size()
             self._update_dimension_labels()
             self._sync_slider_from_target()
+            self._update_processing_plan()
             if not cancelled_selection_optimization and self._selected_triangle_count():
                 self._show_selection_primary_action()
             self.vtk_widget.GetRenderWindow().Render()
@@ -7047,6 +8043,7 @@ class MainWindow(QMainWindow):
         self.operation_uses_process = False
         self._clear_operation_progress()
         self._sync_modified_mesh_actions()
+        self._refresh_imprint_preview_actions()
 
     def _clear_operation_progress(self) -> None:
         progress_path = self.operation_progress_path
@@ -7095,13 +8092,19 @@ class MainWindow(QMainWindow):
             button.orientationRequested.connect(lambda d=direction: self._set_current_view_as(d))
             grid.addWidget(button, row, column)
             self.view_buttons[direction] = button
-        orientation_help = QLabel("Click: view  •  Ctrl+click: set this view", self.view_pad)
-        orientation_help.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        orientation_help.setProperty("muted", True)
-        orientation_help.setStyleSheet("padding: 1px 3px;")
-        grid.addWidget(orientation_help, 2, 0, 1, 3)
         self._refresh_view_button_tooltips()
+        from lathe_control import LatheController
+        self.lathe = LatheController(self, grid, UNIT_MM)
+        self.navigation_style._manual_zoom_callback = self.lathe.mark_manual_zoom
+        self._reorder_tool_sections()
+        self.navigation_style._lathe_callback = self.lathe.interaction
         self.orientation_indicator = OrientationIndicator(self.vtk_widget)
+        self._orientation_mesh_cache = {}
+        self._orientation_mesh_requested = None
+        self._orientation_mesh_future = None
+        self.orientation_mesh_timer = QTimer(self)
+        self.orientation_mesh_timer.setInterval(60)
+        self.orientation_mesh_timer.timeout.connect(self._poll_orientation_miniature)
         self.orientation_indicator.show()
         self.orientation_indicator.raise_()
         self.scale_bar = ViewportScaleBar(self.vtk_widget)
@@ -7111,6 +8114,7 @@ class MainWindow(QMainWindow):
         camera.AddObserver("ModifiedEvent", self._update_orientation_indicator)
         camera.AddObserver("ModifiedEvent", self._diagnostic_camera_modified)
         camera.AddObserver("ModifiedEvent", self._queue_crop_outline_projection)
+        self.vtk_widget.GetRenderWindow().AddObserver("EndEvent", self._repaint_orientation_indicator)
         self._update_orientation_indicator()
         self.view_pad.adjustSize()
         self.view_pad.raise_()
@@ -7128,10 +8132,104 @@ class MainWindow(QMainWindow):
                 f"{set_shortcut_text}"
             )
 
-    def _update_orientation_indicator(self, *_args) -> None:
+    @staticmethod
+    def _build_orientation_miniature(poly):
+        from vtkmodules.vtkFiltersCore import vtkQuadricClustering
+        geometry = vtkPolyData()
+        geometry.SetPoints(poly.GetPoints())
+        geometry.SetPolys(poly.GetPolys())
+        for divisions in (12, 8, 5, 3):
+            if geometry.GetNumberOfPolys() <= 240:
+                break
+            bounds = np.asarray(geometry.GetBounds()).reshape(3, 2)
+            spans = np.ptp(bounds, axis=1)
+            counts = np.maximum(2, np.rint(divisions * spans / max(float(spans.max()), 1e-12))).astype(int)
+            cluster = vtkQuadricClustering()
+            cluster.SetInputData(geometry)
+            cluster.SetNumberOfDivisions(*map(int, counts))
+            cluster.UseInputPointsOn()
+            cluster.Update()
+            geometry = cluster.GetOutput()
+        points, faces = polydata_arrays(geometry)
+        if not len(points) or not len(faces):
+            return None
+        points = np.asarray(points, dtype=float).copy()
+        points -= (points.min(axis=0) + points.max(axis=0)) / 2
+        points *= .82 / max(float(np.linalg.norm(points, axis=1).max()), 1e-12)
+        if len(faces) > 240:
+            faces = faces[np.linspace(0, len(faces) - 1, 240, dtype=int)]
+        return points, faces.copy()
+
+    def _request_orientation_miniature(self):
+        if not hasattr(self, "orientation_mesh_timer") or getattr(self, "_closing", False):
+            return
+        cast = getattr(self, "_envelope_actor", None)
+        actor = cast if cast is not None and cast.GetVisibility() else self.active_actor
+        poly = actor.GetMapper().GetInput() if actor is not None and actor.GetMapper() is not None else None
+        if poly is None or not poly.GetNumberOfPolys():
+            self._orientation_mesh_requested = None
+            self.orientation_indicator.set_miniature(None)
+            return
+        key = (id(poly), poly.GetPoints().GetMTime(), poly.GetPolys().GetMTime())
+        requested = self._orientation_mesh_requested
+        if requested is not None and requested[0] == key:
+            return
+        self._orientation_mesh_requested = (key, poly)
+        self.orientation_indicator.set_miniature(self._orientation_mesh_cache.get(key))
+        self._start_orientation_miniature()
+
+    def _start_orientation_miniature(self):
+        if self._orientation_mesh_future is not None or self._orientation_mesh_requested is None:
+            return
+        key, poly = self._orientation_mesh_requested
+        if key in self._orientation_mesh_cache:
+            return
+        self._orientation_mesh_job_key = key
+        # VTK filters may build or modify internal array/cell caches. Keep the
+        # background miniature pipeline independent of the live OpenGL mapper.
+        snapshot = vtkPolyData()
+        snapshot.DeepCopy(poly)
+        self._orientation_mesh_future = self.executor.submit(self._build_orientation_miniature, snapshot)
+        self.orientation_mesh_timer.start()
+
+    def _poll_orientation_miniature(self):
+        if getattr(self, "_closing", False):
+            self.orientation_mesh_timer.stop()
+            return
+        future = self._orientation_mesh_future
+        if future is None or not future.done():
+            return
+        self.orientation_mesh_timer.stop()
+        self._orientation_mesh_future = None
+        try:
+            miniature = future.result()
+        except Exception:  # noqa: BLE001 - optional orientation preview does not affect the mesh
+            miniature = None
+        key = self._orientation_mesh_job_key
+        self._orientation_mesh_cache[key] = miniature
+        while len(self._orientation_mesh_cache) > 4:
+            self._orientation_mesh_cache.pop(next(iter(self._orientation_mesh_cache)))
+        if self._orientation_mesh_requested is not None and self._orientation_mesh_requested[0] == key:
+            self.orientation_indicator.set_miniature(miniature)
+        else:
+            self._start_orientation_miniature()
+
+    def _repaint_orientation_indicator(self, *_args) -> None:
+        if getattr(self, "_closing", False) or not self.orientation_indicator.isVisible():
+            return
+        # Match the camera used by the completed VTK frame. Deferred Qt paints
+        # can otherwise trail continuous interactive rendering.
+        self._update_orientation_indicator()
+        self.orientation_indicator.repaint()
+
+    def _update_orientation_indicator(self, *_args, force: bool = False) -> None:
         if not hasattr(self, "orientation_indicator"):
             return
+        if not force and getattr(getattr(self,"lathe",None),"_applying",False):
+            return
         camera = self.renderer.GetActiveCamera()
+        if hasattr(self, "lathe"):
+            self.lathe.remember_camera()
         ruler_basis = np.asarray((*camera.GetDirectionOfProjection(), *camera.GetViewUp()))
         previous_basis = getattr(self, "_ruler_camera_basis", None)
         self._ruler_camera_basis = ruler_basis
@@ -7149,6 +8247,10 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, check_rotation)
         self._update_active_view_button(camera)
         orientation = camera.GetOrientation()
+        if hasattr(self, "lathe"):
+            calibrated = self.lathe.display_orientation(camera)
+            if calibrated is not None:
+                orientation = calibrated
         if any(button.isChecked() for button in self.view_buttons.values()):
             orientation = (0.0, 0.0, 0.0)
         self.orientation_indicator.set_camera(
@@ -7159,6 +8261,8 @@ class MainWindow(QMainWindow):
             getattr(self, "orientation_reference_basis", None),
         )
         self._update_scale_bar(camera)
+        if hasattr(self, "lathe"):
+            self.lathe.refresh_probe_positions()
 
     def _set_orientation_reference(self, camera=None) -> None:
         """Use the current camera frame as the local zero for the viewport indicator."""
@@ -7222,12 +8326,19 @@ class MainWindow(QMainWindow):
         decimals = max(0, -exponent)
         label = f"{nice:,.{min(decimals, 3)}f} {unit}"
         self.scale_bar.set_scale(label, pixels)
-        self._apply_rounded_mask(self.scale_bar, 8)
-        self._position_orientation_overlays()
-        self.scale_bar.setVisible(self._overlay_is_visible("scale"))
-        self.scale_bar.raise_()
+        layout_key = (self.scale_bar.size(), self.vtk_widget.size(), self.pos(),
+                      tuple(sorted(self.viewport_overlay_corners.items())),
+                      tuple(sorted(self.viewport_overlay_visible.items())))
+        if layout_key != getattr(self, "_scale_overlay_layout_key", None):
+            self._scale_overlay_layout_key = layout_key
+            self._apply_rounded_mask(self.scale_bar, 8)
+            self._position_orientation_overlays()
+            self.scale_bar.setVisible(self._overlay_is_visible("scale"))
+            self.scale_bar.raise_()
 
     def _update_active_view_button(self, camera=None) -> None:
+        if hasattr(self, "lathe"):
+            self.lathe.button.setEnabled(self.source_poly is not None and not self.busy)
         if not hasattr(self, "view_buttons"):
             return
         if self.source_poly is None:
@@ -7261,6 +8372,9 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "view_pad"):
             return
         self.view_pad.adjustSize()
+        if hasattr(self, "lathe"):
+            self.lathe.refresh_probe_positions()
+        self._apply_rounded_mask(self.view_pad, 10)
         self._position_overlay_in_corner(self.view_pad, "views")
         if self._overlay_is_visible("views") and not self.view_pad.isVisible():
             self.view_pad.show()
@@ -7279,12 +8393,13 @@ class MainWindow(QMainWindow):
                 self.scale_bar.hide()
             self.scale_bar.raise_()
 
-    def _fit_view_bounds(self, bounds) -> None:
+    def _fit_view_bounds(self, bounds, center=None) -> None:
         """Fit projected bounds with a three-percent margin on each viewport edge."""
         camera = self.renderer.GetActiveCamera()
         corners = np.array([(x, y, z) for x in bounds[:2]
                             for y in bounds[2:4] for z in bounds[4:6]], dtype=float)
-        center = (corners.min(axis=0) + corners.max(axis=0)) / 2
+        center = ((corners.min(axis=0)+corners.max(axis=0))/2
+                  if center is None else np.asarray(center,dtype=float))
         view = np.asarray(camera.GetPosition()) - np.asarray(camera.GetFocalPoint())
         view /= max(float(np.linalg.norm(view)), 1e-12)
         up = np.asarray(camera.GetViewUp(), dtype=float)
@@ -7321,9 +8436,9 @@ class MainWindow(QMainWindow):
             for button in self.view_buttons.values():
                 button.setChecked(False)
             return
-        center = np.asarray(
-            ((bounds[0] + bounds[1]) / 2, (bounds[2] + bounds[3]) / 2, (bounds[4] + bounds[5]) / 2)
-        )
+        center = self._keyboard_object_pivot()
+        if center is None:
+            center = np.asarray(((bounds[0]+bounds[1])/2,(bounds[2]+bounds[3])/2,(bounds[4]+bounds[5])/2))
         diagonal = float(np.linalg.norm((bounds[1] - bounds[0], bounds[3] - bounds[2], bounds[5] - bounds[4])))
         distance = max(1.0, diagonal * 2.0)
         self._diagnostic("recall_view_begin", direction=direction, camera=self._camera_state())
@@ -7340,8 +8455,7 @@ class MainWindow(QMainWindow):
         self.renderer.ResetCamera(*bounds)
         camera.SetViewUp(*view_up)
         camera.OrthogonalizeViewUp()
-        self._fit_view_bounds(bounds)
-        self._set_orientation_reference(camera)
+        self._fit_view_bounds(bounds,center=center)
         self.renderer.ResetCameraClippingRange()
         self.vtk_widget.GetRenderWindow().Render()
         self._update_orientation_indicator()
@@ -7511,8 +8625,54 @@ class MainWindow(QMainWindow):
                 return (bounds[[0, 2, 4]] + bounds[[1, 3, 5]]) * 0.5
         return None
 
+    def _keyboard_object_pivot(self) -> np.ndarray | None:
+        lathe = getattr(self, "lathe", None)
+        origin = lathe.navigation_origin() if lathe is not None else None
+        if origin is not None:
+            return origin
+        actor = self.active_actor
+        if actor is None:
+            return None
+        poly = actor.GetMapper().GetInput()
+        cached = getattr(self,"_navigation_mass_cache",None)
+        key = (poly,poly.GetMTime())
+        if cached is None or cached[:2] != key:
+            measured = None
+            source_cache = self.source_measurement_cache
+            if actor is self.source_actor and source_cache is not None:
+                measured = source_cache[2].get("center_of_mass")
+            if measured is None:
+                points,faces = polydata_arrays(poly)
+                measured = source_geometry_measurements(points,faces)["center_of_mass"]
+            cached = (poly,poly.GetMTime(),np.asarray(measured,dtype=float))
+            self._navigation_mass_cache = cached
+        matrix = actor.GetMatrix()
+        value = np.r_[cached[2],1.]
+        transformed = np.array([[matrix.GetElement(i,j) for j in range(4)] for i in range(4)]) @ value
+        return transformed[:3]
+
+    def _keyboard_rotate_about_object(self, axis, degrees: float) -> None:
+        camera = self.renderer.GetActiveCamera()
+        pivot = self._keyboard_object_pivot()
+        if pivot is None:
+            pivot = np.asarray(camera.GetFocalPoint(), dtype=float)
+        axis = np.asarray(axis, dtype=float)
+        axis /= max(float(np.linalg.norm(axis)), 1e-12)
+        angle = math.radians(degrees)
+        def rotate(vector):
+            return (vector * math.cos(angle) + np.cross(axis, vector) * math.sin(angle)
+                    + axis * float(axis @ vector) * (1 - math.cos(angle)))
+        # Rotate the entire camera frame so panning and zoom remain intact.
+        camera.SetPosition(*(pivot + rotate(np.asarray(camera.GetPosition()) - pivot)))
+        camera.SetFocalPoint(*(pivot + rotate(np.asarray(camera.GetFocalPoint()) - pivot)))
+        camera.SetViewUp(*rotate(np.asarray(camera.GetViewUp())))
+        camera.OrthogonalizeViewUp()
+
     def _keyboard_zoom_at_view_center(self, factor: float) -> None:
         """Zoom by a fixed camera-distance ratio without VTK Dolly saturation."""
+        lathe = getattr(self, "lathe", None)
+        if lathe is not None:
+            lathe.mark_manual_zoom()
         camera = self.renderer.GetActiveCamera()
         pivot = self._keyboard_view_pivot()
         if pivot is None:
@@ -7541,26 +8701,72 @@ class MainWindow(QMainWindow):
         if key not in {"left", "right", "up", "down"} or self.busy:
             return False
         command = (key, control, shift)
-        if command != self._navigation_command:
+        if command != self._navigation_command or not self.navigation_timer.isActive():
             self._navigation_steps = 0
+            self._navigation_hold_started = time.monotonic()
         self._navigation_command = command
-        # Four short frames per input, with no accumulating motion backlog.
-        # Reversal replaces pending motion rather than continuing in the old direction.
-        self._navigation_steps = min(4, self._navigation_steps + 4)
+        # Real held keys use elapsed time, independent of OS repeat cadence.
+        # Direct commands retain a short four-frame animation.
+        self._navigation_steps = 4
         if not self.navigation_timer.isActive():
-            self._advance_navigation()
-            if self._navigation_steps:
+            self._navigation_last_tick = time.monotonic() - .016
+            rotation = not control or (shift and key in ("left", "right"))
+            if self._held_navigation_key is not None and rotation:
+                self._keyboard_navigate(*command, fraction=.2)
+                self._navigation_precision_steps = 1
+                self._navigation_last_tick = time.monotonic()
+            else:
+                self._advance_navigation()
+            if self._held_navigation_key is not None or self._navigation_steps:
                 self.navigation_timer.start()
         return True
 
+    def _stop_keyboard_navigation(self) -> None:
+        self.navigation_timer.stop()
+        self._navigation_steps = 0
+        self._held_navigation_key = None
+        self._navigation_last_tick = None
+        self._navigation_hold_started = None
+        self._navigation_precision_steps = 0
+
     def _advance_navigation(self) -> None:
-        if self._navigation_steps <= 0 or self.busy or getattr(self, "_closing", False):
-            self.navigation_timer.stop()
-            self._navigation_steps = 0
+        held = self._held_navigation_key is not None
+        if (not held and self._navigation_steps <= 0) or self.busy or getattr(self, "_closing", False):
+            self._stop_keyboard_navigation()
             return
-        self._navigation_steps -= 1
-        self._keyboard_navigate(*self._navigation_command, fraction=.25)
-        if not self._navigation_steps:
+        now = time.monotonic()
+        elapsed = min(.05, max(.001, now - (self._navigation_last_tick or now)))
+        self._navigation_last_tick = now
+        if not held:
+            self._navigation_steps -= 1
+        key, control, shift = self._navigation_command
+        rotation = not control or (shift and key in ("left", "right"))
+        fraction = elapsed * 16 if held else .25
+        if rotation:
+            if held:
+                started = self._navigation_hold_started
+                duration = max(0., now - started) if started is not None else 0.
+                if duration < .60:
+                    # A quick press has no trailing motion. Initial held repeats
+                    # are individual one-degree steps, independent of OS repeat.
+                    target_steps = 1 + int(duration >= .30) + int(duration >= .45)
+                    if self._navigation_precision_steps >= target_steps:
+                        return
+                    self._navigation_precision_steps = target_steps
+                    fraction = .2
+                else:
+                    ramp = min(1., max(0., (duration - .60) / .50))
+                    fraction *= .2 + .8 * ramp * ramp * (3. - 2. * ramp)
+            else:
+                fraction *= .2
+        elif control:
+            # Fine initial panning and zoom, reaching the existing speed on hold.
+            started = self._navigation_hold_started
+            duration = max(0., now - started) if held and started is not None else 0.
+            ramp = min(1., duration / .8)
+            fraction *= .12 + .88 * ramp * ramp * (3. - 2. * ramp)
+        self._keyboard_navigate(*self._navigation_command, fraction=fraction)
+        if not held and not self._navigation_steps:
             self.navigation_timer.stop()
 
     def _keyboard_navigate(self, key: str, control: bool, shift: bool, fraction: float = 1.) -> bool:
@@ -7574,14 +8780,15 @@ class MainWindow(QMainWindow):
             if invert_axis:
                 key = {"up": "down", "down": "up"}[key]
         camera = self.renderer.GetActiveCamera()
-        if control and shift and key == "up":
-            self._keyboard_zoom_at_view_center(1.28 ** fraction)
-        elif control and shift and key == "down":
-            self._keyboard_zoom_at_view_center(1.28 ** -fraction)
+        if control and shift and key in ("up", "down"):
+            direction = fraction if key == "up" else -fraction
+            lathe = getattr(self, "lathe", None)
+            if lathe is None or not lathe.move_axis_depth(direction):
+                self._keyboard_zoom_at_view_center(1.28 ** direction)
         elif control and shift and key == "left":
-            camera.Roll(5.0 * fraction)
+            self._keyboard_rotate_about_object(camera.GetDirectionOfProjection(), 5.0 * fraction)
         elif control and shift and key == "right":
-            camera.Roll(-5.0 * fraction)
+            self._keyboard_rotate_about_object(camera.GetDirectionOfProjection(), -5.0 * fraction)
         elif key in ("left", "right", "up", "down"):
             if control:
                 position = np.asarray(camera.GetPosition(), dtype=float)
@@ -7597,44 +8804,38 @@ class MainWindow(QMainWindow):
                 right /= max(float(np.linalg.norm(right)), 1e-12)
                 amount = distance * 0.035 * fraction
                 if key == "left":
-                    offset = -right * amount
-                elif key == "right":
                     offset = right * amount
+                elif key == "right":
+                    offset = -right * amount
                 elif key == "up":
-                    offset = view_up * amount
-                else:
                     offset = -view_up * amount
+                else:
+                    offset = view_up * amount
                 camera.SetPosition(*(position + offset))
                 camera.SetFocalPoint(*(focal + offset))
             else:
-                # Re-picking the front surface on each keypress moves the pivot toward the
-                # camera and progressively shortens the orbit radius. Keep one pivot until
-                # another navigation action changes the camera.
-                signature = self._keyboard_camera_signature(camera)
-                orbit = getattr(self, "_keyboard_orbit", None)
-                pivot = (orbit[0] if orbit is not None and orbit[1] == signature
-                         else self._keyboard_view_pivot())
-                if pivot is not None:
-                    camera.SetFocalPoint(*pivot)
-                if key == "left":
-                    camera.Azimuth(-5.0 * fraction)
-                elif key == "right":
-                    camera.Azimuth(5.0 * fraction)
-                elif key == "up":
-                    camera.Elevation(5.0 * fraction)
+                up = np.asarray(camera.GetViewUp(), dtype=float)
+                forward = np.asarray(camera.GetDirectionOfProjection(), dtype=float)
+                if key in ("left", "right"):
+                    lathe = getattr(self, "lathe", None)
+                    frame = lathe.navigation_frame() if lathe is not None else None
+                    axis = frame[1] if frame is not None else up
+                    degrees = 5.0 if key == "left" else -5.0
                 else:
-                    camera.Elevation(-5.0 * fraction)
-                camera.OrthogonalizeViewUp()
-                self._keyboard_orbit = (
-                    np.asarray(camera.GetFocalPoint(), dtype=float),
-                    self._keyboard_camera_signature(camera),
-                )
+                    axis = -np.cross(forward, up)
+                    degrees = -5.0 if key == "up" else 5.0
+                self._keyboard_rotate_about_object(axis, degrees * fraction)
         else:
             return False
         # Keyboard navigation bypasses the interactor's mouse-update path. Mark the camera and
         # refresh the compact X/Y/Z indicator immediately instead of waiting for VTK to emit a
         # later render-side notification.
         camera.Modified()
+        lathe = getattr(self, "lathe", None)
+        if lathe is not None:
+            # Apply the camera/axis change in this frame. A deferred second
+            # render otherwise competes with the next navigation timer tick.
+            lathe.apply_manual_camera(render=False)
         self._update_orientation_indicator()
         self.renderer.ResetCameraClippingRange()
         self.vtk_widget.GetRenderWindow().Render()
@@ -7650,6 +8851,14 @@ class MainWindow(QMainWindow):
         if getattr(self, "_background_workers_stopped", False):
             return
         self._closing = True
+        if hasattr(self, "lathe"):
+            self.lathe.close()
+        self.metrics_timer.stop()
+        self.solidify_info_timer.stop()
+        self.orientation_mesh_timer.stop()
+        split_widget = getattr(self, "_imprint_split_widget", None)
+        if split_widget is not None:
+            split_widget.SetEnabled(False)
         self.update_prompt_timer.stop()
         if self.operation_cancel_event is not None:
             self.operation_cancel_event.set()
@@ -7663,8 +8872,14 @@ class MainWindow(QMainWindow):
         self._background_workers_stopped = True
 
     def closeEvent(self, event) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+            if hasattr(self, "tooltip_filter"):
+                app.removeEventFilter(self.tooltip_filter)
         self._shutdown_background_workers()
         self.gpu_counters.close()
+        self.cuda_counters.close()
         self.vtk_widget.Finalize()
         super().closeEvent(event)
 
@@ -7684,6 +8899,49 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME,
                                 "Open Windows Settings > Apps > Default apps and search for .stl.")
 
+    def _set_recent_files_enabled(self, enabled: bool) -> None:
+        self.recent_files_enabled = enabled
+        self.settings.setValue("files/recent_enabled", enabled)
+        self.recent_files_button.setVisible(enabled)
+        if not enabled:
+            self._clear_recent_files()
+
+    def _clear_recent_files(self) -> None:
+        self.recent_files = []
+        self.settings.remove("files/recent")
+        self.recent_files_menu.clear()
+
+    def _remember_recent_file(self, path: Path) -> None:
+        if not self.recent_files_enabled:
+            return
+        value = os.fspath(path.resolve())
+        self.recent_files = [value] + [item for item in self.recent_files
+                                      if os.path.normcase(item) != os.path.normcase(value)]
+        self.recent_files = self.recent_files[:10]
+        self.settings.setValue("files/recent", self.recent_files)
+
+    def _rebuild_recent_files_menu(self) -> None:
+        self.recent_files_menu.clear()
+        if not self.recent_files:
+            self.recent_files_menu.addAction("No recent files").setEnabled(False)
+            return
+        for value in self.recent_files:
+            path = Path(value)
+            label = self.fontMetrics().elidedText(value, Qt.TextElideMode.ElideMiddle, 420)
+            action = self.recent_files_menu.addAction(label.replace("&", "&&"))
+            action.setToolTip(value)
+            action.setEnabled(path.is_file())
+            action.triggered.connect(lambda _checked=False, p=path: self.load_path(p))
+        self.recent_files_menu.addSeparator()
+        self.recent_files_menu.addAction("Clear recent files", self._clear_recent_files)
+
+    def _show_recent_files(self) -> None:
+        if not self.recent_files_enabled or self.busy:
+            return
+        self._rebuild_recent_files_menu()
+        self.recent_files_menu.popup(self.recent_files_button.mapToGlobal(
+            QPoint(0, self.recent_files_button.height())))
+
     def _file_open_directory(self) -> str:
         mode = self.settings.value("files/open_mode", "last")
         last = str(self.settings.value("files/last_open_folder", ""))
@@ -7697,7 +8955,8 @@ class MainWindow(QMainWindow):
         return os.fspath(folder)
 
     def open_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Open STL", self._file_open_directory(), "STL mesh (*.stl)")
+        path, _ = QFileDialog.getOpenFileName(self, "Open", self._file_open_directory(),
+            "Mesh files (*.stl *.dae *.glb *.obj *.ply);;STL (*.stl);;COLLADA (*.dae);;GLB (*.glb);;OBJ (*.obj);;PLY (*.ply)")
         if path:
             self.load_path(Path(path))
 
@@ -7710,7 +8969,7 @@ class MainWindow(QMainWindow):
         if self.source_path is None:
             return
         QApplication.clipboard().setText(os.fspath(self.source_path))
-        self.status.setText("STL path copied")
+        self.status.setText("Mesh path copied")
 
     def load_path(self, path: Path, *, restore_opening_view: bool = False) -> None:
         if self.busy:
@@ -7719,7 +8978,7 @@ class MainWindow(QMainWindow):
         try:
             file_size = path.stat().st_size
         except OSError as exc:
-            QMessageBox.critical(self, APP_NAME, f"Could not load the STL:\n\n{exc}")
+            QMessageBox.critical(self, APP_NAME, f"Could not load the mesh:\n\n{exc}")
             self.status.setText("Load failed.")
             return
 
@@ -7835,10 +9094,13 @@ class MainWindow(QMainWindow):
             return
 
         self.source_path = path
+        self._remember_recent_file(path)
         self.settings.setValue("files/last_open_folder", os.fspath(path.resolve().parent))
         self.source_poly = poly
         self.source_points = points
         self.source_faces = faces
+        from geometry_workload import record
+        record("CPU", points, faces)
         self.source_measurement_cache = (
             (points, faces, metadata["measurements"])
             if metadata and metadata.get("measurements") is not None else None
@@ -7862,11 +9124,14 @@ class MainWindow(QMainWindow):
         if self.measure_info_frame is not None:
             self.measure_info_frame.hide()
         self.mesh_modified = False
+        self._solidification_applied = False
         self.saved_standard_views.clear()
         self._opening_front_pending = True
         self.orientation_reference_basis = None
+        self.export_calibration_transform = None
         self.has_committed_optimization = False
         self.optimization_script_passes.clear()
+        self.script_base_poly = None
         self.optimization_script_omissions.clear()
         self.undo_stack.clear()
         self.redo_stack.clear()
@@ -7929,7 +9194,8 @@ class MainWindow(QMainWindow):
             f"Overview • {fmt_count(len(faces))} sampled of "
             f"{fmt_count(self.overview_total_triangles)} triangles • editing disabled"
             if self.overview_mode
-            else f"Loaded • {fmt_count(len(faces))} triangles"
+            else f"Loaded • {fmt_count(len(faces))} triangles" +
+                 (" • Geometry only" if path.suffix.lower() != '.stl' else "")
         )
         if self.verification_screenshot is not None:
             self.target.setValue(getattr(self, "verification_target", 200_000))
@@ -8304,6 +9570,7 @@ class MainWindow(QMainWindow):
         )
         controls.addWidget(clear_button)
         layout.addLayout(controls)
+        self._refresh_theme_overlays(appearance_theme(self.appearance_theme_name), self._viewport_theme())
 
     def _measure_units_changed(self, _unit: str) -> None:
         self.measure_units_overridden = True
@@ -8330,7 +9597,7 @@ class MainWindow(QMainWindow):
             for index, length in enumerate(visible, start=first_index)
         )
         rows.append(f"Total: {sum(segments):,.3f} {unit}")
-        rows.append("Shift+click adds or removes a point.")
+        self.measure_info_frame.setToolTip("Shift+click adds or removes a ruler point.")
         self.measure_info_label.setText("\n".join(rows))
         self.measure_info_frame.adjustSize()
         self.measure_info_frame.show()
@@ -8559,7 +9826,8 @@ class MainWindow(QMainWindow):
             action_specs = (
                 ("Crop", "crop", f"Keep only the highlighted triangles. Shortcut: {self.shortcuts['selection_crop']}."),
                 ("Delete", "delete", f"Remove the highlighted triangles. Shortcut: {self.shortcuts['selection_delete']}."),
-                ("Step back", "undo", "Remove the most recently added selection region."),
+                ("Invert", "invert", "Select every triangle that is not selected, and deselect the current selection."),
+                ("Step back", "undo", "Restore the previous selection."),
                 ("Clear", "clear", f"Clear the current selection without changing the mesh. Shortcut: {self.shortcuts['selection_clear']}."),
             )
             for index, (caption, action, help_text) in enumerate(action_specs):
@@ -8574,15 +9842,13 @@ class MainWindow(QMainWindow):
                 action_row.addWidget(button)
             action_row.addStretch(1)
             info_layout.addLayout(action_row)
+            self._refresh_theme_overlays(appearance_theme(self.appearance_theme_name), self._viewport_theme())
+        self.crop_info_frame.setToolTip("Drag corners to edit the selection. Ctrl+drag adds another region. Shift+click measures.")
         self.crop_info_label.setText(
             f"SELECTION\n"
             f"Selected: {fmt_count(len(points))} vertices, {fmt_count(len(faces))} triangles\n"
             f"Mesh share: {self._selection_size_summary(len(faces))}\n"
-            f"Dimensions: {fmt_size(tuple(size))} {unit}\n"
-            f"Before: {fmt_count(len(faces))} triangles\n"
-            f"Optimization target: {fmt_count(target)} triangles\n"
-            f"Drag corners • Left-click line adds • Right-click line removes\n"
-            f"Shift+click measures • Enter adds the selection"
+            f"Dimensions: {fmt_size(tuple(size))} {unit}"
         )
         for button in self.crop_info_frame.findChildren(QPushButton):
             if button.property("selectionAction") in {"crop", "add", "optimize", "delete"}:
@@ -8647,7 +9913,920 @@ class MainWindow(QMainWindow):
         elif action == "delete" and self.selected_face_mask is not None:
             self._delete_selected()
 
+    def _reorder_tool_sections(self):
+        sections = getattr(self, "_toolbox_sections", {})
+        if not sections:
+            return
+        active = next((title for title, toggle in (
+            ("OPTIMIZATION", "optimization_toggle"), ("SOLIDIFY", "solidify_toggle"),
+            ("CAST", "imprint_section_toggle"), ("AXIAL CALIBRATION", "alignment_toggle"))
+            if getattr(self, toggle, None) is not None and getattr(self, toggle).isChecked()), None)
+        if active is None and hasattr(self, "optimization_toggle"):
+            self.optimization_toggle.setChecked(True)
+            active = "OPTIMIZATION"
+        groups = {"Actions": ["ACTIONS"], "Active tool": [active] if active else [],
+                  "Stats": ["STATS"], "General": ["GENERAL"],
+                  "Other tools": [title for title in ("OPTIMIZATION", "SOLIDIFY", "CAST", "AXIAL CALIBRATION") if title != active]}
+        order = [title for group in self.toolbox_order for title in groups[group]]
+        for index, title in enumerate(title for title in order if title in sections):
+            self._toolbox_layout.insertWidget(index + 1, sections[title])
+        self._queue_toolbox_scroll_refresh()
+
+    def _queue_toolbox_scroll_refresh(self):
+        if getattr(self, "_toolbox_scroll_refresh_pending", False) or getattr(self, "_closing", False):
+            return
+        self._toolbox_scroll_refresh_pending = True
+        QTimer.singleShot(0, self._refresh_toolbox_scroll_range)
+
+    def _refresh_toolbox_scroll_range(self):
+        self._toolbox_scroll_refresh_pending = False
+        if getattr(self, "_closing", False):
+            return
+        layout = self.controls_content.layout()
+        layout.activate()
+        height = (layout.totalHeightForWidth(self.controls_widget.viewport().width())
+                  if layout.hasHeightForWidth() else layout.totalSizeHint().height())
+        height = max(0, height, layout.minimumSize().height())
+        if self.controls_content.minimumHeight() != height:
+            self.controls_content.setMinimumHeight(height)
+        # Apply the new extent before scrolling. Collapsible child layouts can
+        # otherwise leave the scroll area using the previous tool's range.
+        self.controls_content.resize(
+            self.controls_widget.viewport().width(),
+            max(height, self.controls_widget.viewport().height()),
+        )
+        if getattr(self, "_toolbox_scroll_to_active", False):
+            self._toolbox_scroll_to_active = False
+            self.controls_widget.verticalScrollBar().setValue(0)
+
+    def _toggle_tool_section(self, name: str, expanded: bool) -> None:
+        if getattr(self, "_switching_tool_section", False):
+            return
+        self._switching_tool_section = True
+        try:
+            self._apply_tool_section(name, expanded)
+        finally:
+            self._switching_tool_section = False
+
+    def _apply_tool_section(self, name: str, expanded: bool) -> None:
+        sections = (("Optimize", "optimization_toggle", "optimization_body"),
+                    ("Solidify", "solidify_toggle", "solidify_body"),
+                    ("Cast", "imprint_section_toggle", "imprint_body"),
+                    ("Axial calibration", "alignment_toggle", "alignment_body"))
+        for label, toggle_name, body_name in sections:
+            toggle, body = getattr(self, toggle_name, None), getattr(self, body_name, None)
+            if toggle is None or body is None:
+                continue
+            if label == name:
+                body.setVisible(expanded)
+                toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+                toggle.setAccessibleName(f"{'Collapse' if expanded else 'Expand'} {label}")
+            elif expanded:
+                toggle.setChecked(False)
+                body.hide()
+                toggle.setArrowType(Qt.ArrowType.RightArrow)
+                toggle.setAccessibleName(f"Expand {label}")
+        if not expanded and not any(
+            getattr(self, toggle_name, None) is not None
+            and getattr(self, toggle_name).isChecked()
+            for _, toggle_name, _ in sections
+        ):
+            self.optimization_toggle.setChecked(True)
+            self._apply_tool_section("Optimize", True)
+            return
+        self._toolbox_scroll_to_active = expanded
+        self._reorder_tool_sections()
+        if expanded and name == "Solidify":
+            self._refresh_solidify_info()
+
+    def _refresh_solidify_availability(self):
+        if hasattr(self, "solidify_preview_button"):
+            marker = (self.source_poly.GetFieldData().GetArray("ImprintClosedOutput")
+                      if self.source_poly is not None else None)
+            imprint_closed = (getattr(self, "_envelope_closed", False)
+                              and getattr(self, "_envelope_poly", None) is not None
+                              and getattr(self, "_envelope_settings_key", None) == self._imprint_preview_settings_key())
+            completed = (getattr(self, "_solidification_applied", False)
+                         or (marker is not None and bool(marker.GetValue(0)))
+                         or imprint_closed
+                         or (getattr(self, "_solidify_preview_context", None) is not None and self.pass_ready))
+            measured = getattr(self, "_solidify_info_result", None)
+            report = (measured[1] if measured is not None
+                      and measured[0] == self._solidify_input_key() else None)
+            already_closed = (report is not None and report["open_edges"] == 0
+                              and report["nonmanifold_edges"] == 0)
+            available = self.source_poly is not None and not completed and not already_closed
+            section = getattr(self, "_toolbox_sections", {}).get("SOLIDIFY")
+            if section is not None:
+                section.setVisible(available)
+                self._queue_toolbox_scroll_refresh()
+            self.solidify_preview_button.setVisible(available)
+            self.solidify_preview_button.setEnabled(available and not self.busy and report is not None)
+            self.solidify_toggle.setEnabled(available and not self.busy)
+            if not available:
+                self.solidify_toggle.setChecked(False)
+            elif not self.busy:
+                self._refresh_solidify_info()
+
+    def _toggle_imprint_section(self, expanded: bool) -> None:
+        self._toggle_tool_section("Cast", expanded)
+        self.imprint_section_toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        self.imprint_section_toggle.setAccessibleName("Collapse Cast" if expanded else "Expand Cast")
+        self.imprint_body.setVisible(expanded)
+        if not expanded:
+            self.imprint_pick_surface.setChecked(False)
+        self._refresh_imprint_plan()
+        self._sync_imprint_split_widget()
+        if hasattr(self, "renderer"):
+            self._update_envelope_overlay()
+
+    def _toggle_imprint_surface_pick(self, picking: bool) -> None:
+        if not hasattr(self, "vtk_widget"):
+            return
+        if picking and (self.source_poly is None or self.busy):
+            self.imprint_pick_surface.setChecked(False)
+            return
+        self.vtk_widget.setCursor(Qt.CursorShape.CrossCursor if picking else Qt.CursorShape.ArrowCursor)
+        split_widget = getattr(self, "_imprint_split_widget", None)
+        if split_widget is not None:
+            split_widget.SetProcessEvents(not picking and not self.busy
+                                          and getattr(self, "_imprint_plane_mode", "Rotate") == "Move")
+        if picking:
+            self.envelope_original_visible.setChecked(True)
+            self._show_poly(self.source_poly, reset_camera=False)
+            self.source_actor.SetVisibility(True)
+            self.vtk_widget.GetRenderWindow().Render()
+        self._sync_imprint_split_widget()
+
+    def _clear_imprint_surface_picks(self) -> None:
+        self._imprint_surface_seeds = []
+        self._imprint_surface_seed_source = self.source_poly
+        self.imprint_pick_surface.setChecked(False)
+        self._imprint_settings_changed()
+
+    def _handle_imprint_surface_pick(self, position) -> bool:
+        if not self.imprint_pick_surface.isChecked() or self.busy:
+            return False
+        from vtkmodules.vtkRenderingCore import vtkCellPicker
+        picker = vtkCellPicker()
+        picker.SetTolerance(.001)
+        picker.PickFromListOn()
+        picker.AddPickList(self.source_actor)
+        picker.Pick(position[0], position[1], 0, self.renderer)
+        index = picker.GetCellId()
+        if index < 0 or self.source_faces is None or index >= len(self.source_faces):
+            self.vtk_widget.setToolTip("Click directly on the mesh.")
+            return True
+        selected = self.crop_candidate[3] if self.crop_candidate is not None else self.selected_face_mask
+        if selected is not None and not selected[index]:
+            self.vtk_widget.setToolTip("Pick a surface within the selected region.")
+            return True
+        vertices = self.source_points[self.source_faces[index]]
+        point = vertices.mean(axis=0)
+        normal = np.cross(vertices[1] - vertices[0], vertices[2] - vertices[0])
+        normal /= max(float(np.linalg.norm(normal)), 1e-20)
+        if float(normal @ (np.asarray(self.renderer.GetActiveCamera().GetPosition()) - point)) < 0:
+            normal = -normal
+        self._imprint_surface_seeds.append({"point": point.tolist(), "normal": normal.tolist()})
+        self._imprint_surface_seed_source = self.source_poly
+        self.imprint_pick_surface.setChecked(False)
+        self._imprint_settings_changed()
+        return True
+
+    def _imprint_memory_budget(self) -> int:
+        return max(1024**2, int(available_physical_memory() * .06))
+
+    def _pending_solid_imprint_input(self):
+        context = getattr(self, "_solidify_preview_context", None)
+        if context is None or not self.pass_ready or self.preview_poly is None:
+            return None
+        selected = self.crop_candidate[3] if self.crop_candidate is not None else self.selected_face_mask
+        previous = context.get("mask")
+        if previous is None and (selected is None or not selected.any()):
+            return self.preview_poly
+        if previous is not None and selected is not None and np.array_equal(previous, selected):
+            return context["solid_poly"]
+        return None
+
+    def _refresh_imprint_plan(self) -> None:
+        if not hasattr(self, "imprint_detail"):
+            return
+        if getattr(self, "_imprint_surface_seed_source", None) is not self.source_poly:
+            self._imprint_surface_seeds = []
+            self._imprint_surface_seed_source = self.source_poly
+            self.imprint_pick_surface.setChecked(False)
+        picks = len(self._imprint_surface_seeds)
+        self.imprint_clear_picks.setText(f"Clear picks ({picks})" if picks else "Clear picks")
+        self.imprint_pick_surface.setEnabled(self.source_poly is not None and not self.busy)
+        self.imprint_clear_picks.setEnabled(bool(picks) and not self.busy)
+        self.imprint_clear_picks.setVisible(bool(picks))
+        scale = (max(np.ptp(np.asarray(self.source_poly.GetBounds()).reshape(3, 2), axis=1))
+                 if self.source_poly is not None else 100.)
+        self.solidify_gap.set_geometry(scale)
+        for control in (self.imprint_offset, self.imprint_wall, self.imprint_bridge):
+            control.set_geometry(scale)
+        mold = self.imprint_output.currentText() == "Clamshell"
+        preparation_needed = (mold and self._pending_solid_imprint_input() is None
+                              and not self._working_mesh_requires_closed_output())
+        self.imprint_prepare_solid.setVisible(preparation_needed)
+        self.imprint_form.labelForField(self.imprint_prepare_solid).setVisible(preparation_needed)
+        for widget in (self.imprint_shape, self.imprint_wall, self.imprint_bridge, self.imprint_detail, self.imprint_split):
+            widget.setVisible(mold)
+            self.imprint_form.labelForField(widget).setVisible(mold)
+        self._sync_imprint_split_widget()
+        self.envelope_button.setEnabled(self.source_poly is not None and not self.busy)
+        detail_help = "Left: coarser and faster. Right: finer detail. Resolution adapts to available memory."
+        if mold and self.source_poly is not None:
+            from clamshell_mold import mold_sampling_plan
+            bounds = np.asarray(self.source_poly.GetBounds()).reshape(3, 2)
+            bounds += np.array([-1, 1]) * self.imprint_offset.value()
+            plan = mold_sampling_plan(bounds, self.imprint_wall.value(), self.imprint_bridge.value(),
+                                      memory_budget_bytes=self._imprint_memory_budget(),
+                                      detail=(.5, .75, 1, 1.5, 2)[self.imprint_detail.value()])
+            adjusted = " · memory adjusted" if plan["memory_adjusted"] else ""
+            detail_help += f"\nSampling pitch: {plan['pitch_mm']:.3f} mm. Estimated memory: {fmt_bytes(plan['estimated_bytes'])}{adjusted}."
+        self.imprint_detail.setToolTip(detail_help)
+        self._refresh_imprint_preview_actions()
+
+    def _imprint_preview_settings_key(self):
+        mold = self.imprint_output.currentText() == "Clamshell"
+        pending_solid = self._pending_solid_imprint_input()
+        key = (id(self.source_poly), id(pending_solid) if pending_solid is not None else None,
+               self.imprint_output.currentText(), self.imprint_offset.value(),
+               tuple((tuple(seed["point"]), tuple(seed["normal"])) for seed in self._imprint_surface_seeds))
+        selected = self.crop_candidate[3] if self.crop_candidate is not None else self.selected_face_mask
+        key += (selected.tobytes() if selected is not None else None,)
+        if mold:
+            key += (self.imprint_prepare_solid.isChecked(), self.imprint_shape.currentText(),
+                    self.imprint_wall.value(), self.imprint_bridge.value(), self.imprint_detail.value(),
+                    self.imprint_split.currentText())
+            if self.imprint_prepare_solid.isChecked():
+                key += (self.solidify_method.currentText(), self.solidify_gap.value(), self.solidify_quality.currentText())
+            if self.imprint_split.currentText() == "Custom":
+                rep = getattr(self, "_imprint_split_representation", None)
+                if rep is not None:
+                    key += (tuple(rep.GetNormal()), tuple(rep.GetOrigin()))
+            elif self.imprint_split.currentText() == "Current view":
+                key += (tuple(self.renderer.GetActiveCamera().GetDirectionOfProjection()),)
+        return key
+
+    def _refresh_imprint_preview_actions(self):
+        if not hasattr(self, "envelope_controls"):
+            return
+        present = getattr(self, "_envelope_poly", None) is not None
+        current = present and getattr(self, "_envelope_settings_key", None) == self._imprint_preview_settings_key()
+        self.envelope_separate_halves.setVisible(present and self.imprint_output.currentText() == "Clamshell"
+                                               and len(getattr(self, "_envelope_halves", [])) == 2)
+        self.envelope_controls.setVisible(current)
+        self.envelope_stats.setVisible(current)
+        self._update_envelope_overlay()
+        self.envelope_button.setText("Cast")
+        self.envelope_button.setToolTip(
+            "Regenerate the cast preview with the changed settings before applying or saving."
+            if present and not current else "Create an cast preview using the current settings."
+        )
+        self._refresh_workflow_actions()
+        self._update_estimated_size()
+
+    def _imprint_settings_changed(self, *_args) -> None:
+        self._refresh_imprint_plan()
+        if hasattr(self, "imprint_error"):
+            self.imprint_error.hide()
+        self._refresh_imprint_preview_actions()
+
+    def _sync_imprint_split_widget(self) -> None:
+        if not hasattr(self, "renderer"):
+            return
+        visible = (self.imprint_section_toggle.isChecked() and self.source_poly is not None and self.imprint_output.currentText() == "Clamshell"
+                   and self.imprint_split.currentText() == "Custom" and not getattr(self, "_closing", False))
+        help_text = ("Rotate: drag in the viewport; drag around the edge to roll. "
+                     "Move: drag the plane. Middle-drag rotates the camera.") if visible else ""
+        if self.imprint_pick_surface.isChecked():
+            help_text = "Click a known exterior surface."
+        self.vtk_widget.setToolTip(help_text)
+        self.imprint_split.setToolTip(help_text)
+        widget = getattr(self, "_imprint_split_widget", None)
+        if not visible:
+            self._imprint_plane_drag = None
+            if widget is not None:
+                widget.SetEnabled(False)
+                self.renderer.RemoveViewProp(self._imprint_split_representation)
+            if hasattr(self, "imprint_plane_tools"):
+                self.imprint_plane_tools.hide()
+            self._schedule_imprint_split_render()
+            return
+        if widget is None:
+            from vtkmodules.vtkInteractionWidgets import (
+                vtkImplicitPlaneRepresentation,
+                vtkImplicitPlaneWidget2,
+            )
+            representation = vtkImplicitPlaneRepresentation()
+            representation.SetPlaceFactor(1.15)
+            representation.DrawPlaneOn()
+            representation.DrawOutlineOff()
+            representation.OutlineTranslationOff()
+            representation.ScaleEnabledOff()
+            representation.LockNormalToCameraOff()
+            representation.SetHandleSize(10)
+            representation.SetHandleColor(.1, 1, .85)
+            representation.GetPlaneProperty().SetColor(1, .12, .45)
+            representation.GetPlaneProperty().SetOpacity(.08)
+            representation.GetSelectedPlaneProperty().SetColor(1, .12, .45)
+            representation.GetSelectedPlaneProperty().SetOpacity(.15)
+            for prop in (representation.GetNormalProperty(), representation.GetEdgesProperty()):
+                prop.SetColor(1, .12, .45)
+                prop.SetLineWidth(4)
+                prop.SetAmbient(1)
+            representation.GetNormalProperty().SetColor(.1, 1, .85)
+            representation.GetSelectedNormalProperty().SetColor(1, .85, .1)
+            widget = vtkImplicitPlaneWidget2()
+            widget.SetInteractor(self.vtk_widget.GetRenderWindow().GetInteractor())
+            widget.SetCurrentRenderer(self.renderer)
+            widget.SetRepresentation(representation)
+            widget.SetPriority(.95)
+            widget.AddObserver("StartInteractionEvent", self._imprint_plane_started)
+            widget.AddObserver("InteractionEvent", self._imprint_plane_moved)
+            widget.AddObserver("EndInteractionEvent", self._imprint_plane_moved)
+            self._imprint_split_widget = widget
+            self._imprint_split_representation = representation
+            self.imprint_plane_tools = QFrame(self.vtk_widget)
+            self.imprint_plane_tools.setObjectName("splitPlaneTools")
+            tools_row = QHBoxLayout(self.imprint_plane_tools)
+            tools_row.setContentsMargins(7, 5, 7, 5)
+            tools_row.setSpacing(5)
+            tools_row.addWidget(QLabel("Split", self.imprint_plane_tools))
+            self._imprint_plane_mode_buttons = {}
+            for mode in ("Move", "Rotate"):
+                button = QPushButton(mode, self.imprint_plane_tools)
+                button.setCheckable(True)
+                button.setProperty("toolMode", True)
+                button.setToolTip("Drag the plane along its normal." if mode == "Move" else "Drag in the viewport to turn the plane. Drag around the edge to roll it clockwise or counterclockwise.")
+                button.clicked.connect(lambda _checked=False, selected=mode: self._set_imprint_plane_mode(selected))
+                self._imprint_plane_mode_buttons[mode] = button
+                tools_row.addWidget(button)
+            center_button = QPushButton("Center", self.imprint_plane_tools)
+            center_button.setToolTip("Move the split plane to the model center, keeping its angle.")
+            center_button.clicked.connect(self._center_imprint_plane)
+            tools_row.addWidget(center_button)
+            self._set_imprint_plane_mode("Rotate")
+        representation = self._imprint_split_representation
+        if getattr(self, "_imprint_widget_source", None) is not self.source_poly:
+            representation.PlaceWidget(self.source_poly.GetBounds())
+            representation.SetOrigin(*self.source_poly.GetCenter())
+            representation.SetNormal(0, 0, 1)
+            self._imprint_widget_source = self.source_poly
+        widget.SetProcessEvents(not self.busy and not self.imprint_pick_surface.isChecked()
+                                and getattr(self, "_imprint_plane_mode", "Rotate") == "Move")
+        if not widget.GetEnabled():
+            widget.SetEnabled(True)
+        if not self.renderer.HasViewProp(representation):
+            self.renderer.AddViewProp(representation)
+        self.imprint_plane_tools.setEnabled(not self.busy)
+        representation.SetVisibility(True)
+        self.imprint_plane_tools.show()
+        self._position_imprint_plane_tools()
+        self._schedule_imprint_split_render()
+
+    def _schedule_imprint_split_render(self) -> None:
+        # Qt controls do not trigger VTK interaction renders. Coalesce their
+        # updates and render after layout changes, outside VTK callbacks.
+        if getattr(self, "_imprint_split_render_pending", False) or getattr(self, "_closing", False):
+            return
+        self._imprint_split_render_pending = True
+        QTimer.singleShot(0, self._render_imprint_split)
+
+    def _render_imprint_split(self) -> None:
+        self._imprint_split_render_pending = False
+        if getattr(self, "_closing", False):
+            return
+        self.renderer.ResetCameraClippingRange()
+        self.vtk_widget.GetRenderWindow().Render()
+
+    def _position_imprint_plane_tools(self) -> None:
+        tools = getattr(self, "imprint_plane_tools", None)
+        if tools is not None and tools.isVisible():
+            tools.adjustSize()
+            tools.move(max(8, (self.vtk_widget.width() - tools.width()) // 2),
+                       max(8, self.vtk_widget.height() - tools.height() - 14))
+            tools.raise_()
+            self._apply_rounded_mask(tools, 8)
+
+    def _set_imprint_plane_mode(self, mode: str) -> None:
+        self._imprint_plane_mode = mode
+        for name, button in self._imprint_plane_mode_buttons.items():
+            button.setChecked(name == mode)
+        widget = getattr(self, "_imprint_split_widget", None)
+        if widget is not None:
+            widget.SetProcessEvents(mode == "Move" and not self.busy
+                                    and not self.imprint_pick_surface.isChecked())
+        self._imprint_plane_drag = None
+
+    def _center_imprint_plane(self) -> None:
+        if self.busy or self.source_poly is None:
+            return
+        self._imprint_split_representation.SetOrigin(*self.source_poly.GetCenter())
+        self._imprint_plane_moved()
+        self.vtk_widget.GetRenderWindow().Render()
+
+    def _imprint_trackball_vector(self, position, center, radius):
+        x, y = (position.x() - center[0]) / radius, (center[1] - position.y()) / radius
+        length = x*x + y*y
+        vector = np.array([x, y, np.sqrt(max(0., 1. - length))])
+        return vector / max(np.linalg.norm(vector), 1e-12)
+
+    def _handle_imprint_plane_drag(self, event) -> bool:
+        mouse_types = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove, QEvent.Type.MouseButtonRelease)
+        if event.type() not in mouse_types:
+            return False
+        widget = getattr(self, "_imprint_split_widget", None)
+        active = (widget is not None and widget.GetEnabled() and not self.busy
+                  and getattr(self, "_imprint_plane_mode", "Rotate") == "Rotate"
+                  and not self.imprint_pick_surface.isChecked())
+        if not active:
+            self._imprint_plane_drag = None
+            return False
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() != Qt.MouseButton.LeftButton or event.modifiers() != Qt.KeyboardModifier.NoModifier:
+                return False
+            representation = self._imprint_split_representation
+            self.renderer.SetWorldPoint(*representation.GetOrigin(), 1.)
+            self.renderer.WorldToDisplay()
+            dx, dy, _ = self.renderer.GetDisplayPoint()
+            rw, rh = self.vtk_widget.GetRenderWindow().GetSize()
+            center = (dx*self.vtk_widget.width()/max(1,rw),
+                      (rh-dy)*self.vtk_widget.height()/max(1,rh))
+            radius = max(40., min(self.vtk_widget.width(), self.vtk_widget.height())*.32)
+            camera = self.renderer.GetActiveCamera()
+            forward = np.array(camera.GetDirectionOfProjection())
+            right = np.cross(forward, camera.GetViewUp()); right /= np.linalg.norm(right)
+            up = np.cross(right, forward)
+            self._imprint_plane_drag = (self._imprint_trackball_vector(event.position(), center, radius),
+                np.array(representation.GetNormal()), np.column_stack((right, up, -forward)), center, radius)
+            return True
+        drag = getattr(self, "_imprint_plane_drag", None)
+        if drag is None:
+            return False
+        if event.type() == QEvent.Type.MouseButtonRelease:
+            if event.button() != Qt.MouseButton.LeftButton:
+                return False
+            self._imprint_plane_drag = None
+            return True
+        start, normal, basis, center, radius = drag
+        end = self._imprint_trackball_vector(event.position(), center, radius)
+        axis = np.cross(start, end)
+        sine = np.linalg.norm(axis); cosine = np.clip(start @ end, -1., 1.)
+        if sine > 1e-10:
+            axis = basis @ (axis / sine)
+            rotated = normal*cosine + np.cross(axis, normal)*sine + axis*(axis @ normal)*(1.-cosine)
+            self._imprint_split_representation.SetNormal(*(rotated / np.linalg.norm(rotated)))
+            self._imprint_plane_moved()
+            self._schedule_imprint_split_render()
+        return True
+
+    def _imprint_plane_started(self, _widget=None, _event=None) -> None:
+        representation = self._imprint_split_representation
+        if representation.GetInteractionState() != representation.Outside:
+            state = representation.Rotating if self._imprint_plane_mode == "Rotate" else representation.Pushing
+            representation.SetInteractionState(state)
+
+    def _imprint_plane_moved(self, _widget=None, _event=None) -> None:
+        # The VTK widget renders its own interaction. Do not re-enable it or
+        # enter Render() recursively from this callback.
+        self._refresh_imprint_preview_actions()
+
+    @staticmethod
+    def _solidify_pitch(poly, quality):
+        scale = float(np.ptp(np.asarray(poly.GetBounds()).reshape(3, 2), axis=1).max())
+        return scale / {"Draft": 96, "Balanced": 160, "Fine": 224}[quality]
+
+    def _solidify_input_key(self):
+        mask = self.crop_candidate[3] if self.crop_candidate is not None else self.selected_face_mask
+        selection = hash(mask.tobytes()) if mask is not None and mask.any() else None
+        return (self.generation, id(self.source_poly), selection)
+
+    def _refresh_solidify_info(self):
+        if self.source_poly is None or not hasattr(self, "solidify_info_labels") or getattr(self, "_closing", False):
+            return
+        key = self._solidify_input_key()
+        if self._solidify_info_result is not None and self._solidify_info_result[0] == key:
+            report = self._solidify_info_result[1]
+            unit = self.units.currentText()
+            self.solidify_info_labels["open_rims"].setText(f"Open rims\n{fmt_count(report['open_rims'])}")
+            self.solidify_info_labels["open_rims"].setToolTip(
+                f"Connected open-border groups in the current input: {report['closed_loops']} closed loops. Cropped selection boundaries also count. A rim is evidence of an opening, not a known amount of missing wall.")
+            self.solidify_info_labels["open_edges"].setText(f"Open edges\n{fmt_count(report['open_edges'])}")
+            self.solidify_info_labels["open_edges"].setToolTip(
+                f"Edges with a face on just one side, measured at STL precision. {report['nonmanifold_edges']} edges have more than two faces. Repairability is established by generating and validating a preview.")
+            self.solidify_info_labels["rim_length"].setText(f"Rim length\n{report['rim_length'] / UNIT_MM[unit]:.2f} {unit}")
+            self.solidify_info_labels["rim_length"].setToolTip("Combined length of open borders. This is perimeter, not missing area or wall thickness. The completed preview reports how much surface was rebuilt.")
+            return
+        if self._solidify_info_key != key:
+            for label, title in zip(self.solidify_info_labels.values(), ("Open rims", "Open edges", "Rim length")):
+                label.setText(title + "\n?")
+                label.setToolTip("Measuring open boundaries in the current mesh or selection.")
+        if self._solidify_info_future is not None or self.busy:
+            return
+        self._solidify_info_key = key
+        points, faces = self.source_points, self.source_faces
+        mask = self.crop_candidate[3] if self.crop_candidate is not None else self.selected_face_mask
+        mask = mask.copy() if mask is not None and mask.any() else None
+        def measure():
+            from solidify_metrics import input_metrics
+            return input_metrics(points, faces[mask] if mask is not None else faces)
+        self._solidify_info_future = self.executor.submit(measure)
+        self.solidify_info_timer.start()
+
+    def _poll_solidify_info(self):
+        future = self._solidify_info_future
+        if getattr(self, "_closing", False) or future is None:
+            self.solidify_info_timer.stop()
+            return
+        if not future.done():
+            return
+        self.solidify_info_timer.stop()
+        self._solidify_info_future = None
+        try:
+            self._solidify_info_result = (self._solidify_info_key, future.result())
+        except Exception:  # noqa: BLE001 - optional boundary measurements do not prevent repair
+            for label in self.solidify_info_labels.values():
+                label.setText("Unavailable")
+            return
+        # Availability follows the analysis even when the section is collapsed.
+        # Stale results from a previous mesh or selection cannot hide this input.
+        self._refresh_solidify_availability()
+
+    def _solidify_settings_changed(self, *_args):
+        method = self.solidify_method.currentText()
+        for control in (self.solidify_gap, self.solidify_quality):
+            control.setVisible(method == "Voxel gap closing")
+            self.solidify_form.labelForField(control).setVisible(method == "Voxel gap closing")
+        self.solidify_error.hide()
+        if getattr(self, "_solidify_preview_context", None) is not None:
+            self.solidify_preview_button.setText("Solidify")
+            self._set_primary_action(False, False)
+        self._imprint_settings_changed()
+
+    def _cancel_solidify_preview(self, _checked=False):
+        if self.busy:
+            if self.active_operation.startswith("Solidifying"):
+                self._cancel_mesh_operation()
+            else:
+                return
+        self._cancel_optimized_preview()
+        self._solidify_preview_context = None
+        self.solidify_preview_button.setText("Solidify")
+        self.status.setText("Solid preview discarded")
+
+    def _preview_solidify(self, _checked=False) -> None:
+        if self.busy or self.source_poly is None or getattr(self, "_solidification_applied", False):
+            return
+        measured = self._solidify_info_result
+        if measured is not None and measured[0] == self._solidify_input_key():
+            report = measured[1]
+            if report["open_edges"] == 0 and report["nonmanifold_edges"] == 0:
+                self._refresh_solidify_availability()
+                return
+        poly = self.source_poly
+        mask = None
+        if self.crop_candidate is not None:
+            poly, _, _, mask = self.crop_candidate
+            mask = mask.copy()
+        elif self.selected_face_mask is not None and self.selected_face_mask.any():
+            mask = self.selected_face_mask.copy()
+            poly = self._poly_from_face_mask(mask)[0]
+        snapshot = vtkPolyData()
+        snapshot.DeepCopy(poly)
+        source_points, source_faces = self.source_points, self.source_faces
+        self._clear_envelope()
+        self.imprint_section_toggle.setChecked(False)
+        if self.preview_poly is not None:
+            self._cancel_optimized_preview()
+        method = self.solidify_method.currentText()
+        solid_quality = self.solidify_quality.currentText()
+        gap = self.solidify_gap.value()
+        pitch = self._solidify_pitch(snapshot, self.solidify_quality.currentText())
+        budget = self._imprint_memory_budget()
+        script_step = None if mask is not None else {"kind": "solidify", "method": method,
+            "quality": solid_quality.lower(), "gap_mm": gap, "gpu": self.gpu_preference}
+        self.solidify_error.hide()
+        token = self._begin_mesh_operation("Solidifying selection" if mask is not None else "Solidifying mesh", "Local")
+        cancel = self.operation_cancel_event
+        progress_path = self._start_operation_progress(token, "Preparing solid")
+        self.operation_steps = ["Checking surface intersections", "Repairing local surface defects",
+                                "Building constrained volume", "Classifying volume", "Resolving surface contacts",
+                                "Sampling solid surface", "Closing solid gaps", "Filling solid interior",
+                                "Creating solid mesh", "Validating solid", "Analyzing results"]
+
+        def progress(stage, completed, total):
+            _write_process_progress(progress_path, stage, completed, total)
+
+        def job():
+            try:
+                from solidify import solidify_mesh
+                solid, report = solidify_mesh(snapshot, method, gap, pitch, budget, cancel, progress,
+                                              gpu_preference=self.gpu_preference)
+                completion = report["completion"]
+                from solidify import combine_selected_solid
+                preview = combine_selected_solid(source_points, source_faces, mask, solid)
+                points, faces = polydata_arrays(preview)
+                metrics = mesh_quality_metrics(source_points, source_faces, points, faces,
+                                               progress=progress, cancel_event=cancel)
+                return {"kind": "solidify", "poly": preview, "solid_poly": solid,
+                        "points": points, "faces": faces, "metrics": metrics,
+                        "mask": mask, "source_points": source_points, "source_faces": source_faces,
+                        "report": report, "completion": completion, "script_step": script_step}
+            except Exception as error:  # noqa: BLE001 - report worker failures inline
+                return {"kind": "solidify", "error": str(error).strip() or type(error).__name__}
+        future = self.executor.submit(job)
+        self.operation_future = future
+        future.add_done_callback(lambda result: self._deliver_mesh_edit_future(token, "solidify", result))
+
+    def _create_envelope(self) -> None:
+        if self.busy or self.source_poly is None or getattr(self, "_closing", False):
+            return
+        pending_solid = self._pending_solid_imprint_input()
+        if self.preview_poly is not None and self.preview_poly is not self.source_poly and pending_solid is None:
+            self._cancel_optimized_preview()
+        self.imprint_error.hide()
+        mode, offset = self.imprint_output.currentText(), self.imprint_offset.value()
+        shape, split = self.imprint_shape.currentText(), self.imprint_split.currentText()
+        self._sync_imprint_split_widget()
+        representation = getattr(self, "_imprint_split_representation", None)
+        settings_key = self._imprint_preview_settings_key()
+        custom_normal = representation.GetNormal() if representation is not None else (0, 0, 1)
+        custom_origin = representation.GetOrigin() if representation is not None else self.source_poly.GetCenter()
+        from clamshell_mold import mold_sampling_plan
+        bounds = np.asarray(self.source_poly.GetBounds()).reshape(3, 2)
+        bounds += np.array([-1, 1]) * offset
+        memory_budget = self._imprint_memory_budget()
+        plan = mold_sampling_plan(bounds, self.imprint_wall.value(), self.imprint_bridge.value(),
+                                  memory_budget_bytes=memory_budget,
+                                  detail=(.5, .75, 1, 1.5, 2)[self.imprint_detail.value()])
+        wall, bridge, pitch = plan['wall_mm'], plan['bridge_mm'], plan['pitch_mm']
+        poly = pending_solid if pending_solid is not None else self.source_poly
+        if pending_solid is None and self.crop_candidate is not None:
+            poly = self.crop_candidate[0]
+        elif pending_solid is None and self.selected_face_mask is not None and self.selected_face_mask.any():
+            poly = self._poly_from_face_mask(self.selected_face_mask)[0]
+        from vtkmodules.vtkCommonDataModel import vtkPolyData
+        snapshot = vtkPolyData()
+        snapshot.DeepCopy(poly)
+        surface_seeds = tuple({"point": tuple(seed["point"]), "normal": tuple(seed["normal"])}
+                              for seed in self._imprint_surface_seeds)
+        selected = self.crop_candidate[3] if self.crop_candidate is not None else self.selected_face_mask
+        surface_key = (id(self.source_poly), id(pending_solid) if pending_solid is not None else None,
+                       hash(selected.tobytes()) if selected is not None else None,
+                       offset, self.gpu_preference, tuple((seed["point"], seed["normal"]) for seed in surface_seeds))
+        solidify_settings = (self.solidify_method.currentText(), self.solidify_gap.value(),
+                             self.solidify_quality.currentText()) if mode == "Clamshell" and self.imprint_prepare_solid.isChecked() else None
+        surface_key += (solidify_settings,)
+        surface_cache = getattr(self, "_imprint_surface_cache", None)
+        camera = self.renderer.GetActiveCamera()
+        imprint_direction = np.asarray(camera.GetFocalPoint()) - np.asarray(camera.GetPosition())
+        token = self._begin_mesh_operation("Cast", "Building preview")
+        token = self.edit_generation
+
+        envelope_cancel = self.operation_cancel_event
+        envelope_gpu = self.gpu_preference
+        progress_path = self._start_operation_progress(token, "Preparing surface normals")
+        self.operation_steps = ["Preparing surface normals", "Detecting supported surface sheets", "Measuring wall thickness", "Building ray index", "Preparing GPU kernel",
+                                "Surface probes", "Creating offset mesh"]
+        if mode == "Clamshell":
+            self.operation_steps.extend(["Measuring exterior depth", "Bridging cavity volume", "Removing interior islands",
+                                         "Building outer blob", "Sampling outer blob", "Adding clamshell walls", "Removing detached material",
+                                         "Creating hollow clamshell", "Splitting clamshell half 1", "Splitting clamshell half 2", "Cleaning generated geometry"])
+        last_report = [0.0, ""]
+
+        def envelope_progress(stage, completed, total):
+            now = time.monotonic()
+            if stage != last_report[1] or now - last_report[0] >= 0.08 or completed == total:
+                _write_process_progress(progress_path, stage, completed, total)
+                last_report[:] = [now, stage]
+
+        split_normal = None if split == "Unsplit" else (
+            custom_normal if split == "Custom" else
+            imprint_direction if split == "Current view" else np.eye(3)[["X", "Y", "Z"].index(split)])
+        prepared_settings = solidify_settings
+        if pending_solid is not None:
+            context = getattr(self, "_solidify_preview_context", {}) or {}
+            pending_step = context.get("script_step")
+            if pending_step:
+                prepared_settings = (pending_step['method'], pending_step['gap_mm'], pending_step['quality'].title())
+        script_step = None if (surface_seeds or (selected is not None and selected.any())) else {
+            "kind": "cast", "mode": mode, "offset_mm": offset, "shape": shape,
+            "wall_mm": self.imprint_wall.value(), "bridge_mm": self.imprint_bridge.value(),
+            "detail": (.5, .75, 1, 1.5, 2)[self.imprint_detail.value()], "gpu": envelope_gpu,
+            "split_normal": np.asarray(split_normal).tolist() if split_normal is not None else None,
+            "split_origin": list(custom_origin) if split == "Custom" else None,
+            "prepare_solid": prepared_settings is not None,
+            "method": prepared_settings[0] if prepared_settings else "Surface repair",
+            "gap_mm": prepared_settings[1] if prepared_settings else 0,
+            "solidify_quality": prepared_settings[2].lower() if prepared_settings else "balanced"}
+
+        def build():
+            try:
+                from exposed_surface import exposed_surface
+                if surface_cache is not None and surface_cache[0] == surface_key:
+                    _, result, report = surface_cache
+                    envelope_progress("Creating offset mesh", 3, 3)
+                else:
+                    prepared = snapshot
+                    from solidify import needs_solidification
+                    needs_preparation = needs_solidification(snapshot)
+                    if solidify_settings is not None:
+                        from solidify import solidify_mesh
+                        if needs_preparation:
+                            prepared, _ = solidify_mesh(snapshot, solidify_settings[0], solidify_settings[1],
+                                self._solidify_pitch(snapshot, solidify_settings[2]), memory_budget,
+                                cancel=envelope_cancel, progress=envelope_progress,
+                                gpu_preference=envelope_gpu)
+                            needs_preparation = False
+                    elif mode == "Clamshell" and needs_preparation:
+                        raise ValueError("The scan is open. Enable Prepare with Solidify and review the Solidify method and gap settings.")
+                    marker = prepared.GetFieldData().GetArray("ImprintClosedOutput")
+                    if not needs_preparation or (marker is not None and marker.GetValue(0)):
+                        from solidify import offset_solid
+                        result, report = offset_solid(prepared, offset)
+                    else:
+                        result, report = exposed_surface(prepared, offset, cancel=envelope_cancel,
+                                                         gpu_preference=envelope_gpu, progress=envelope_progress,
+                                                         surface_seeds=surface_seeds)
+                from closed_reduction import is_closed_mesh
+                cached_surface = (surface_key, result, report)
+                if mode == "Envelope":
+                    output_points, output_faces = polydata_arrays(result)
+                    closed_output = is_closed_mesh(output_points, output_faces)
+                    return {"kind": "envelope", "settings_key": settings_key, "poly": result, "spacing": None, "mode": mode,
+                            "report": report, "surface_cache": cached_surface, "closed_output": closed_output, "script_step": script_step}
+                from vtkmodules.vtkFiltersCore import vtkAppendPolyData
+
+                from clamshell_mold import clamshell_mold
+                split_normal = None if split == "Unsplit" else (
+                    custom_normal if split == "Custom" else
+                    imprint_direction if split == "Current view" else np.eye(3)[["X", "Y", "Z"].index(split)])
+                halves, mold_report = clamshell_mold(result, wall, bridge, pitch, split_normal, shape,
+                                                     cancel=envelope_cancel, progress=envelope_progress,
+                                                     memory_budget_bytes=memory_budget,
+                                                     split_origin=custom_origin if split == "Custom" else None)
+                combined = vtkAppendPolyData()
+                for half in halves:
+                    combined.AddInputData(half)
+                combined.Update()
+                return {"kind": "envelope", "settings_key": settings_key, "poly": combined.GetOutput(), "spacing": mold_report['pitch_mm'],
+                        "mode": f"{shape} clamshell", "halves": halves, "report": mold_report, "script_step": script_step,
+                        "closed_output": True,
+                        "surface_cache": cached_surface, "split_normal": split_normal,
+                        "split_origin": custom_origin if split == "Custom" else result.GetCenter()}
+            except Exception as exc:  # noqa: BLE001 - relay experimental worker errors to the UI.
+                return {"kind": "envelope", "error": str(exc).strip() or type(exc).__name__}
+
+        future = self.executor.submit(build)
+        self.operation_future = future
+        future.add_done_callback(lambda f: self._deliver_mesh_edit_future(token, "envelope", f))
+
+    def _clear_envelope(self) -> None:
+        self.envelope_button.setText("Cast")
+        for original, visibility in getattr(self, "_envelope_original_actors", []):
+            original.SetVisibility(visibility)
+        self._envelope_original_actors = []
+        for rim in getattr(self, "_envelope_rim_actors", []):
+            self.renderer.RemoveActor(rim)
+        self._envelope_rim_actors = []
+        actor = getattr(self, "_envelope_actor", None)
+        if actor is not None:
+            self.renderer.RemoveActor(actor)
+        self._envelope_actor = None
+        self._envelope_poly = None
+        self._request_orientation_miniature()
+        self._envelope_closed = False
+        self._envelope_settings_key = None
+        self._envelope_halves = []
+        self._envelope_spaced_halves = []
+        self._envelope_spaced_poly = None
+        self.envelope_separate_halves.hide()
+        self.envelope_controls.hide()
+        self.envelope_stats.hide()
+        self.envelope_stats.clear()
+        self._refresh_imprint_preview_actions()
+        self.vtk_widget.GetRenderWindow().Render()
+
+    def _update_envelope_overlay(self, *_args) -> None:
+        actor = getattr(self, "_envelope_actor", None)
+        if actor is not None:
+            expanded = (self.imprint_section_toggle.isChecked()
+                        and getattr(self, "_envelope_settings_key", None) == self._imprint_preview_settings_key())
+            halves = getattr(self, "_envelope_halves", [])
+            if len(halves) == 2 and self.envelope_separate_halves.isChecked():
+                actor.GetMapper().SetInputData(self._envelope_spaced_poly)
+            else:
+                actor.GetMapper().SetInputData(self._envelope_poly)
+            self._set_actor_display_mode(actor)
+            actor.GetMapper().ScalarVisibilityOff()
+            actor.GetProperty().SetColor(1.0, 0.72, 0.15)
+            for original, visibility in getattr(self, "_envelope_original_actors", []):
+                original.SetVisibility(visibility if not expanded or self.envelope_original_visible.isChecked() else False)
+            actor.SetVisibility(expanded and self.envelope_visible.isChecked())
+            actor.GetProperty().SetOpacity(self.envelope_opacity.value() / 100)
+            for index, rim in enumerate(getattr(self, "_envelope_rim_actors", [])):
+                rim.SetVisibility(expanded and self.envelope_visible.isChecked())
+                if self.envelope_separate_halves.isChecked():
+                    shift = (np.asarray(self._envelope_spaced_halves[index].GetPoint(0))
+                             - np.asarray(self._envelope_halves[index].GetPoint(0)))
+                    rim.SetPosition(*shift)
+                else:
+                    rim.SetPosition(0, 0, 0)
+                self.renderer.AddActor(rim)
+            self._request_orientation_miniature()
+            self.vtk_widget.GetRenderWindow().Render()
+
+    def _replace_with_envelope(self) -> None:
+        poly = getattr(self, "_envelope_poly", None)
+        if getattr(self, "_envelope_spaced_poly", None) is not None and self.envelope_separate_halves.isChecked():
+            poly = self._envelope_spaced_poly
+        if (self.busy or poly is None or not poly.GetNumberOfPolys()
+                or getattr(self, "_envelope_settings_key", None) != self._imprint_preview_settings_key()):
+            return
+        replacement = vtkPolyData()
+        replacement.DeepCopy(poly)
+        points, faces = polydata_arrays(replacement)
+        closed_output = getattr(self, "_envelope_closed", False)
+        script_step = getattr(self, "_envelope_script_step", None)
+        if script_step is not None:
+            script_step = dict(script_step, separate_halves=self.envelope_separate_halves.isChecked())
+        if closed_output:
+            from vtkmodules.vtkCommonCore import vtkIntArray
+            marker = vtkIntArray()
+            marker.SetName("ImprintClosedOutput")
+            marker.InsertNextValue(1)
+            replacement.GetFieldData().AddArray(marker)
+        self._clear_envelope()
+        if getattr(self, "_solidify_preview_context", None) is not None:
+            self._cancel_optimized_preview()
+        for control, value in ((self.imprint_output, "Clamshell"),
+                               (self.imprint_shape, "Blob"), (self.imprint_split, "Unsplit")):
+            with QSignalBlocker(control):
+                control.setCurrentText(value)
+        for control in (self.imprint_offset, self.imprint_wall, self.imprint_bridge):
+            with QSignalBlocker(control):
+                control.reset_auto()
+        for control, value in ((self.imprint_detail, 2), (self.envelope_opacity, 15)):
+            with QSignalBlocker(control):
+                control.setValue(value)
+        self._imprint_surface_cache = None
+        self._imprint_surface_seeds = []
+        self.imprint_pick_surface.setChecked(False)
+        self._imprint_widget_source = None
+        if hasattr(self, "_imprint_plane_mode_buttons"):
+            self._set_imprint_plane_mode("Rotate")
+        self.imprint_error.clear()
+        self.imprint_error.hide()
+        self.imprint_section_toggle.setChecked(False)
+        self._sync_imprint_split_widget()
+        self._refresh_imprint_plan()
+        self._set_working_mesh(
+            replacement, points, faces, "Replaced working mesh with cast",
+            committed_optimization=False, script_pass=script_step,
+            script_omission="Selection or guided cast" if script_step is None else None,
+            solidification_applied=closed_output,
+        )
+        self.optimization_toggle.setChecked(True)
+        self._refresh_imprint_plan()
+        self._refresh_imprint_preview_actions()
+
+    def _save_envelope(self) -> None:
+        poly = getattr(self, "_envelope_poly", None)
+        if (self.busy or poly is None
+                or getattr(self, "_envelope_settings_key", None) != self._imprint_preview_settings_key()):
+            return
+        halves = (self._envelope_spaced_halves if self.envelope_separate_halves.isChecked()
+                  else getattr(self, "_envelope_halves", []))
+        title = "Save clamshell halves" if len(halves) == 2 else "Save cast"
+        remembered = str(self.settings.value("imprint/save_directory", ""))
+        directory = Path(remembered) if remembered else None
+        if directory is None or not directory.is_dir():
+            directory = self.source_path.parent if self.source_path else Path(self._file_open_directory())
+        from mesh_export_ui import choose_mesh_export
+        choice = choose_mesh_export(self, title, directory / "cast.stl", poly)
+        if choice is None:
+            return
+        base, merge = choice
+        outputs = [(base, poly)]
+        if len(halves) == 2:
+            outputs = [(base.with_name(f"{base.stem}-half-{i + 1}{base.suffix}"), half) for i, half in enumerate(halves)]
+            if (any(destination.exists() for destination, _ in outputs)
+                    and QMessageBox.question(self, APP_NAME, "Replace existing clamshell half files?") != QMessageBox.StandardButton.Yes):
+                return
+        if self.source_path and any(destination.resolve() == Path(self.source_path).resolve() for destination, _ in outputs):
+            QMessageBox.warning(self, APP_NAME, "Choose a separate output file.")
+            return
+        marker = poly.GetFieldData().GetArray("ImprintClosedOutput")
+        self._export_meshes(outputs, merge, closed=bool(marker is not None and marker.GetValue(0)))
+        self.settings.setValue("imprint/save_directory", str(base.resolve().parent))
+
     def _apply_selection_action(self, action: str) -> None:
+        if action == "invert":
+            self._invert_selection()
+            return
         if action == "clear":
             self._clear_selection()
             return
@@ -8712,6 +10891,11 @@ class MainWindow(QMainWindow):
         algorithm = self.algorithm.currentText()
         source_points = self.source_points
         source_faces = self.source_faces
+        preserve_closed = self._working_mesh_requires_closed_output()
+        if getattr(self, "_envelope_poly", None) is not None:
+            self._clear_envelope()
+        if getattr(self, "_solidify_preview_context", None) is not None:
+            self._cancel_optimized_preview()
         token = self._begin_mesh_operation(
             "Optimizing selection",
             (
@@ -8724,9 +10908,9 @@ class MainWindow(QMainWindow):
         cancel_event = self.operation_cancel_event
         progress_path = self._start_operation_progress(
             token,
-            "Analyzing depth and density on GPU"
+            "Analyzing depth and density"
             if algorithm == DEPTH_DENSITY_ADAPTIVE_LABEL
-            else "Analyzing surface on GPU"
+            else "Analyzing surface"
             if is_gpu_guided_algorithm(algorithm)
             else "Reducing mesh topology",
         )
@@ -8766,6 +10950,11 @@ class MainWindow(QMainWindow):
                 remap[used] = np.arange(len(used))
                 merged_points = np.ascontiguousarray(combined_points[used])
                 merged_faces = np.ascontiguousarray(remap[combined_faces], dtype=np.int32)
+                from closed_reduction import validate_closed_reduction
+                closed_output = preserve_closed
+                if closed_output:
+                    merged_points, merged_faces = validate_closed_reduction(merged_points, merged_faces,
+                        lambda stage, done, total: _write_process_progress(progress_path, stage, done, total))
                 metrics = mesh_quality_metrics(
                     source_points,
                     source_faces,
@@ -8776,6 +10965,7 @@ class MainWindow(QMainWindow):
                     ),
                     cancel_event=cancel_event,
                 )
+                metrics["closed_output"] = closed_output
                 return {
                     "kind": "optimize",
                     "poly": arrays_polydata(merged_points, merged_faces),
@@ -8805,6 +10995,38 @@ class MainWindow(QMainWindow):
         mask = self.selected_face_mask.copy()
         _, points, faces = self._poly_from_face_mask(mask)
         self._optimize_selected_region(points, faces, mask)
+
+    def _invert_selection(self) -> None:
+        if self.busy or self.source_faces is None or self.source_points is None:
+            return
+        previous = (self.crop_candidate[3].copy() if self.crop_candidate is not None else
+                    self.selected_face_mask.copy() if self.selected_face_mask is not None else
+                    np.zeros(len(self.source_faces), dtype=bool))
+        if len(previous) != len(self.source_faces):
+            return
+        self._discard_selection_preview_for_retry()
+        points, faces = self.source_points, self.source_faces
+        token = self._begin_mesh_operation("Inverting selection", "Selecting unselected triangles")
+        cancel = self.operation_cancel_event
+
+        def job():
+            try:
+                mask = np.logical_not(previous)
+                selected = faces[mask]
+                used, inverse = np.unique(selected, return_inverse=True)
+                if cancel.is_set():
+                    return {"kind": "invert-selection", "cancelled": True}
+                selected_points = np.ascontiguousarray(points[used])
+                selected_faces = np.ascontiguousarray(inverse.reshape(-1, 3), dtype=np.int32)
+                return {"kind": "invert-selection", "previous": previous,
+                        "candidate": (arrays_polydata(selected_points, selected_faces),
+                                      selected_points, selected_faces, mask)}
+            except Exception:  # noqa: BLE001 - worker errors are delivered to the GUI
+                return {"kind": "invert-selection", "error": traceback.format_exc()}
+
+        future = self.executor.submit(job)
+        self.operation_future = future
+        future.add_done_callback(lambda f: self.edit_bridge.done.emit(token, f.result()))
 
     def _poly_from_face_mask(self, mask: np.ndarray) -> tuple[vtkPolyData, np.ndarray, np.ndarray]:
         selected_faces = self.source_faces[mask]
@@ -8861,8 +11083,7 @@ class MainWindow(QMainWindow):
             "SELECTION\n"
             f"Selected: {fmt_count(len(points))} vertices, {fmt_count(len(faces))} triangles\n"
             f"Mesh share: {self._selection_size_summary(len(faces))}\n"
-            f"Dimensions: {fmt_size(tuple(size))} {unit}\n"
-            "Choose an action • Ctrl+drag adds more"
+            f"Dimensions: {fmt_size(tuple(size))} {unit}"
         )
         if self.selection_undo_button is not None:
             self.selection_undo_button.setVisible(self._can_step_back_selection())
@@ -8875,10 +11096,10 @@ class MainWindow(QMainWindow):
         if not self.selection_undo_stack:
             return False
         previous = self.selection_undo_stack[-1]
-        return previous is not None and bool(previous.any())
+        return previous is not None
 
     def _undo_selection(self) -> None:
-        """Restore the selection that existed before the most recent selection drag."""
+        """Restore the selection before the most recent selection change."""
         if not self.selection_undo_stack:
             return
         previous = self.selection_undo_stack.pop()
@@ -8992,12 +11213,55 @@ class MainWindow(QMainWindow):
         self.operation_future = future
         future.add_done_callback(lambda f: self.edit_bridge.done.emit(token, f.result()))
 
+    def _deliver_mesh_edit_future(self, token, kind, future):
+        if future.cancelled() or getattr(self, "_closing", False):
+            return
+        try:
+            result = future.result()
+        except Exception as error:  # noqa: BLE001 - worker failures are presented by the owning tool
+            result = {"kind": kind, "error": str(error).strip() or type(error).__name__}
+        self.edit_bridge.done.emit(token, result)
+
     def _finish_mesh_edit(self, token: int, result: dict) -> None:
         if token != self.edit_generation:
             return
         error = result.get("error")
-        if error:
+        if "error" in result:
+            error = str(error or "The operation returned no validated result.")
             self._end_mesh_operation()
+            if result.get("kind") == "solidify":
+                self._solidify_preview_context = None
+                self.solidify_toggle.setChecked(True)
+                if "intersect" in error.lower():
+                    message = "Input surfaces intersect.\nCrop scan noise or select the intended region, then retry."
+                elif "already closed" in error.lower():
+                    message = error
+                else:
+                    message = "Solidify could not produce a validated solid.\nCrop suspect geometry or try a smaller selection."
+                self.solidify_error.setText(message)
+                self.solidify_error.setToolTip(error)
+                self.solidify_error.show()
+                self.status.setText("Solidify failed; mesh unchanged")
+                self._refresh_workflow_actions()
+                QTimer.singleShot(0, lambda: self.controls_widget.ensureWidgetVisible(self.solidify_error, 8, 16))
+                return
+            if result.get("kind") == "envelope":
+                self._clear_envelope()
+                self.imprint_section_toggle.setChecked(True)
+                if "intersect" in error.lower():
+                    message = "Input surfaces intersect.\nCrop scan noise or select the intended region, then retry Cast."
+                elif "already closed" in error.lower():
+                    message = "The preparation step made no changes.\nReview the source solid before retrying Cast."
+                else:
+                    message = "Cast could not produce a validated preview.\nCrop suspect geometry or try a smaller selection."
+                self.imprint_error.setText(message)
+                self.imprint_error.setToolTip(error)
+                self.imprint_error.show()
+                self.envelope_button.setText("Cast")
+                self.status.setText("Cast failed; mesh unchanged")
+                self._refresh_workflow_actions()
+                QTimer.singleShot(0, lambda: self.controls_widget.ensureWidgetVisible(self.imprint_error, 8, 16))
+                return
             QMessageBox.critical(self, APP_NAME, f"Mesh operation failed:\n\n{error}")
             self.status.setText("Mesh operation failed.")
             return
@@ -9006,8 +11270,108 @@ class MainWindow(QMainWindow):
             self.status.setText("Mesh operation cancelled")
             return
         kind = result["kind"]
-        if kind == "connected-selection":
+        if kind == "envelope" and (result.get("poly") is None or not result["poly"].GetNumberOfPolys()):
+            self._finish_mesh_edit(token, {"kind": "envelope", "error": "Cast returned an empty mesh."})
+            return
+        if kind == "solidify":
+            self._finish_simplify(self.generation, result["points"], result["faces"], result["metrics"], None)
+            self.preview_poly = result["poly"]
+            self._solidify_preview_context = result
+            self.solidify_preview_button.setText("Solidify")
+            self.solidify_toggle.setChecked(False)
+            self._refresh_imprint_plan()
+            self._refresh_workflow_actions()
+            self.status.setText("Solid preview ready")
+            return
+        if kind == "envelope":
             self._end_mesh_operation()
+            if result.get("surface_cache") is not None:
+                self._imprint_surface_cache = result["surface_cache"]
+            self._clear_envelope()
+            self._envelope_poly = result["poly"]
+            self._envelope_closed = bool(result.get("closed_output", False))
+            self._envelope_settings_key = result.get("settings_key")
+            self._envelope_script_step = result.get("script_step")
+            self._envelope_halves = result.get("halves", [])
+            if len(self._envelope_halves) == 2 and result.get("split_normal") is not None:
+                from clamshell_mold import split_rim_lines
+                for half in self._envelope_halves:
+                    lines = split_rim_lines(half, result["split_normal"], result["split_origin"],
+                                            max(result["spacing"] * 1e-4, 1e-6))
+                    line_mapper = vtkPolyDataMapper()
+                    line_mapper.SetInputData(lines)
+                    line_mapper.ScalarVisibilityOff()
+                    rim = vtkActor()
+                    rim.SetMapper(line_mapper)
+                    rim.PickableOff()
+                    rim.GetProperty().SetColor(1.0, .12, .45)
+                    rim.GetProperty().SetLineWidth(4.0)
+                    rim.GetProperty().SetAmbient(1)
+                    rim.GetProperty().SetDiffuse(0)
+                    self._envelope_rim_actors.append(rim)
+            if len(self._envelope_halves) == 2:
+                from vtkmodules.vtkFiltersCore import vtkAppendPolyData
+
+                from clamshell_mold import separated_mold_halves
+                self._envelope_spaced_halves = separated_mold_halves(self._envelope_halves)
+                joined = vtkAppendPolyData()
+                for half in self._envelope_spaced_halves:
+                    joined.AddInputData(half)
+                joined.Update()
+                self._envelope_spaced_poly = joined.GetOutput()
+            self.envelope_separate_halves.setVisible(len(self._envelope_halves) == 2)
+            self.envelope_separate_halves.setChecked(len(self._envelope_halves) == 2)
+            triangle_count = self._envelope_poly.GetNumberOfCells()
+            vertex_count = self._envelope_poly.GetNumberOfPoints()
+            self.envelope_stats.setText(
+                f"{fmt_count(triangle_count)} triangles · "
+                f"{fmt_count(vertex_count)} vertices · "
+                f"{fmt_bytes(binary_stl_size(triangle_count))} STL"
+            )
+            self.envelope_stats.setToolTip("Estimated binary STL file size, not memory usage.")
+            if "halves" in result:
+                self.envelope_stats.setToolTip(
+                    f"Sampling pitch: {result['spacing']:.3f} mm. Cavity fit and gap bridging are approximate. "
+                    "Separate parts applies to preview, replacement and export, preserving independent selection after STL import."
+                )
+            self.envelope_stats.show()
+            mapper = vtkPolyDataMapper()
+            mapper.SetInputData(self._envelope_poly)
+            mapper.ScalarVisibilityOff()
+            actor = vtkActor()
+            actor.SetMapper(mapper)
+            actor.PickableOff()
+            actor.GetProperty().SetColor(1.0, 0.72, 0.15)
+            self._envelope_actor = actor
+            self._envelope_source_poly = self.source_poly
+            self._envelope_original_actors = [
+                (original, original.GetVisibility())
+                for original in (self.active_actor, self.crop_selection_actor)
+                if original is not None
+            ]
+            self.renderer.AddActor(actor)
+            self.envelope_original_visible.setChecked(True)
+            self.envelope_visible.setChecked(True)
+            self.envelope_controls.show()
+            self.renderer.ResetCameraClippingRange()
+            self._update_envelope_overlay()
+            self.envelope_button.setText("Cast")
+            self.imprint_error.hide()
+            self._refresh_imprint_preview_actions()
+            self._sync_imprint_split_widget()
+            if result["spacing"] is None:
+                report = result["report"]
+                self.status.setText(
+                    f"{report.get('device', 'CPU')} · {report.get('seconds', 0):.1f}s · "
+                    f"{report['kept']:,} triangles · {report['removed']:,} hidden triangles removed"
+                )
+            else:
+                self.status.setText(f"Clamshell preview: {result['spacing']:.3f} mm voxel spacing")
+            return
+        if kind in {"connected-selection", "invert-selection"}:
+            self._end_mesh_operation()
+            if kind == "invert-selection":
+                self.selection_target = None
             self.selected_face_mask = None
             self.selection_undo_stack.append(result["previous"])
             self.crop_points = []
@@ -9040,6 +11404,10 @@ class MainWindow(QMainWindow):
         if self.source_poly is None:
             return
         self.preview_poly = result["poly"]
+        if result.get("metrics", {}).get("closed_output"):
+            from vtkmodules.vtkCommonCore import vtkIntArray
+            marker = vtkIntArray(); marker.SetName("ImprintClosedOutput"); marker.InsertNextValue(1)
+            self.preview_poly.GetFieldData().AddArray(marker)
         self.simplified_actor = None
         self.preview_is_selection = True
         self.preview_dirty = False
@@ -9122,6 +11490,12 @@ class MainWindow(QMainWindow):
             self.has_committed_optimization,
             tuple(self.optimization_script_passes),
             tuple(self.optimization_script_omissions),
+            getattr(self, "_solidification_applied", False),
+            self.target.value(), self.smart_quality.currentText(),
+            getattr(self, "_last_quality_metrics", None),
+            getattr(self, "_last_quality_measured", False),
+            self.script_base_poly,
+            getattr(self, "_preview_script_step", None),
         )
 
     def _record_history_state(self) -> None:
@@ -9151,8 +11525,13 @@ class MainWindow(QMainWindow):
         committed_optimization: bool | None = None,
         script_pass: dict[str, object] | None = None,
         script_omission: str | None = None,
+        solidification_applied: bool = False,
     ) -> None:
         self._mark_geometry_activity(message, 3.0)
+        self._solidify_preview_context = None
+        self.solidify_preview_button.setText("Solidify")
+        self.solidify_error.clear()
+        self.solidify_error.hide()
         previous_target = (
             self.selection_base_target
             if preserve_target and self.selection_base_target is not None
@@ -9167,10 +11546,15 @@ class MainWindow(QMainWindow):
             # Working arrays are replaced, never modified in place, so retaining references makes
             # undo instantaneous even for multi-million-triangle scans.
             self._record_history_state()
+        self._solidification_applied = solidification_applied
         if script_pass is not None:
             self.optimization_script_passes.append(script_pass)
-        if script_omission and script_omission not in self.optimization_script_omissions:
-            self.optimization_script_omissions.append(script_omission)
+        if script_pass is None:
+            self.script_base_poly = poly
+            self.optimization_script_passes.clear()
+            checkpoint_edit = script_omission or "Mesh edit"
+            if checkpoint_edit not in self.optimization_script_omissions:
+                self.optimization_script_omissions.append(checkpoint_edit)
         self.timer.stop()
         self._cancel_crop(None)
         self._reset_previous_view()
@@ -9217,6 +11601,7 @@ class MainWindow(QMainWindow):
         self.showing_original = True
         self._update_dimension_labels()
         self._update_estimated_size()
+        self._update_processing_plan()
         self._show_poly(poly)
         QTimer.singleShot(500, self._precache_source_analysis)
         self._reset_previous_view()
@@ -9264,10 +11649,12 @@ class MainWindow(QMainWindow):
         # Ending the busy state restores the controls that were enabled before navigation.
         # Reapply state-derived availability afterward so undoing back to the loaded mesh does
         # not leave Reload Original enabled from the edited state.
-        self._sync_modified_mesh_actions()
         self._reset_previous_view()
+        self._sync_modified_mesh_actions()
 
     def _restore_history_state(self, state: MeshHistoryState, message: str) -> None:
+        self._solidify_preview_context = None
+        self.solidify_preview_button.setText("Solidify")
         self.timer.stop()
         self._cancel_crop(None)
         self.showing_previous = False
@@ -9277,10 +11664,11 @@ class MainWindow(QMainWindow):
         self.generation += 1
         self.pending_target = None
         self.source_poly = state.poly
+        self._solidification_applied = state.solidification_applied
         self.source_points = state.points
         self.source_faces = state.faces
         self.source_actor = state.actor
-        self.mesh_modified = state.modified
+        self.mesh_modified = state.modified or self.export_calibration_transform is not None
         self.preview_poly = state.preview_poly
         self.preview_is_selection = False
         self.simplified_actor = state.preview_actor
@@ -9290,15 +11678,22 @@ class MainWindow(QMainWindow):
         self.showing_original = state.showing_original
         self.preview_dirty = state.preview_dirty
         self.has_committed_optimization = state.committed_optimization
+        self.script_base_poly = state.script_base_poly
+        self._preview_script_step = state.preview_script_step
         self.optimization_script_passes = list(state.optimization_script_passes)
         self.optimization_script_omissions = list(state.optimization_script_omissions)
         self._update_save_button_label()
 
+        if state.quality is not None:
+            with QSignalBlocker(self.smart_quality):
+                self.smart_quality.setCurrentText(state.quality)
         self.original_count.setText(fmt_count(len(state.faces)))
         self.original_vertices.setText(fmt_count(len(state.points)))
-        self.reload_button.setEnabled(state.modified)
+        self.reload_button.setEnabled(self.mesh_modified)
         with QSignalBlocker(self.target):
             self.target.setMaximum(max(1_000, len(state.faces)))
+            self.target.setValue(state.target_value if state.target_value is not None else
+                                 smart_target(state.points, state.faces, self.smart_quality.currentText()))
         self._update_dynamic_presets()
         self._sync_slider_from_target()
         self._update_dimension_labels()
@@ -9314,7 +11709,7 @@ class MainWindow(QMainWindow):
             self.toggle_mesh_button.setText(
                 "Show optimized" if state.showing_original else "Show original"
             )
-            self.save_button.setEnabled(state.modified)
+            self.save_button.setEnabled(self.mesh_modified)
             self._set_primary_action(
                 not state.preview_dirty and state.preview_poly is not state.poly,
                 (not state.preview_dirty and state.preview_poly is not state.poly)
@@ -9331,6 +11726,9 @@ class MainWindow(QMainWindow):
             self.save_button.setEnabled(state.modified)
             self._set_primary_action(False, state.preview_dirty and len(state.faces) > 1_000)
             self._show_poly(state.poly, reset_camera=False)
+        if state.preview_poly is not None:
+            self._update_quality_metrics(state.quality_metrics, measured=state.quality_measured)
+        self._update_processing_plan()
         self.status.setText(message)
 
     def _discard_selection_preview_for_retry(self) -> None:
@@ -9391,14 +11789,18 @@ class MainWindow(QMainWindow):
         self.settings.setValue("performance/large_mesh_mode", self.large_mesh_mode)
         self._update_processing_plan()
 
+    def _set_processing_summary(self, text: str) -> None:
+        self.processing_route.setToolTip(self._processing_help + "\n\n" + text)
+
     def _update_processing_plan(self) -> None:
-        if not hasattr(self, "processing_plan"):
+        if not hasattr(self, "processing_route"):
             return
-        triangle_count = self.overview_total_triangles or (
-            len(self.source_faces) if self.source_faces is not None else 0
+        triangle_count = (
+            self.overview_total_triangles if self.tiled_mode
+            else len(self.source_faces) if self.source_faces is not None else 0
         )
         if not triangle_count:
-            self.processing_plan.setText("Processing: open a mesh to estimate time and quality")
+            self._set_processing_summary("Processing: open a mesh to estimate time and quality")
             return
 
         workers = self.geometry_processes or min(8, max(1, self.logical_cpu_count // 2))
@@ -9432,12 +11834,12 @@ class MainWindow(QMainWindow):
                     f"{route_label} • single mesh • est. {full_seconds:.1f} s • "
                     "baseline quality"
                 )
-            self.processing_plan.setText(text)
+            self._set_processing_summary(text)
             return
 
         break_even = tiled_runtime_break_even(triangle_count, algorithm, index_ready)
         if break_even is None:
-            self.processing_plan.setText(
+            self._set_processing_summary(
                 f"{route.title()} • {workers} workers • time and quality estimate unavailable"
             )
             return
@@ -9447,13 +11849,13 @@ class MainWindow(QMainWindow):
         )
         if use_tiled:
             setup_text = "cached index" if setup_seconds == 0 else f"{setup_seconds:.1f} s setup"
-            self.processing_plan.setText(
+            self._set_processing_summary(
                 f"Tiled • {workers} workers • est. {tiled_seconds:.1f} s ({setup_text}) • "
                 "avg error +6% • peak error +4%"
             )
         else:
             route_label = "Auto → full mesh" if route == "auto" else "Full mesh"
-            self.processing_plan.setText(
+            self._set_processing_summary(
                 f"{route_label} • single mesh • est. {full_seconds:.1f} s • baseline quality"
             )
 
@@ -9489,6 +11891,7 @@ class MainWindow(QMainWindow):
         self.preview_dirty = True
         self._set_primary_action(False, not self.busy)
         self.target.setValue(target)
+        self._sync_slider_from_target()
         self._update_estimated_size()
 
     def _algorithm_changed(self, _algorithm: str) -> None:
@@ -9516,7 +11919,7 @@ class MainWindow(QMainWindow):
         ):
             self._discard_selection_preview_for_retry()
             self.timer.stop()
-            self._update_estimated_size()
+            self._apply_smart_target()
             self.status.setText(f"Selection algorithm • {_algorithm}")
             return
         self.preview_dirty = True
@@ -9524,8 +11927,38 @@ class MainWindow(QMainWindow):
         self.toggle_mesh_button.setEnabled(
             self.preview_poly is not None and self.preview_poly is not self.source_poly
         )
-        self._update_estimated_size()
+        self._apply_smart_target()
         self._update_processing_plan()
+
+    def _optimization_slider_knots(self, total):
+        candidate = self.crop_candidate
+        mask = self.selected_face_mask
+        selected = self._selected_triangle_count()
+        key = (id(self.source_points), id(self.source_faces), total,
+               id(candidate), id(mask), selected)
+        cached = getattr(self, "_optimization_slider_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1:]
+        if candidate is not None and len(candidate[2]):
+            _, points, faces, _ = candidate
+            measurements = None
+        elif selected and mask is not None:
+            _, points, faces = self._poly_from_face_mask(mask)
+            measurements = None
+        else:
+            points, faces = self.source_points, self.source_faces
+            measurements = self._cached_source_measurements(points, faces)
+        if measurements is None:
+            measurements = {"bounds": np.ptp(points, axis=0), "area": mesh_surface_area(points, faces)}
+        minimum = min(1_000, max(1, total - 1))
+        maximum = max(minimum + 1, total)
+        scale = total / max(1, len(faces))
+        presets = [np.clip(round(smart_target(points, faces, quality, measurements) * scale),
+                           minimum, maximum) for quality in SMART_DIVISORS]
+        positions = np.array((0., 300., 600., 900., 1000.))
+        counts = np.maximum.accumulate(np.array((minimum, *presets, maximum), dtype=float))
+        self._optimization_slider_cache = (key, positions, counts)
+        return positions, counts
 
     def _slider_changed(self, value: int) -> None:
         if self.source_faces is None:
@@ -9534,10 +11967,8 @@ class MainWindow(QMainWindow):
         total = selection_total or (
             self.overview_total_triangles if self.tiled_mode else len(self.source_faces)
         )
-        minimum = min(1_000, max(4, total - 1))
-        low = math.log10(minimum)
-        high = math.log10(max(minimum + 1, total))
-        count = max(minimum, int(round(10 ** (low + (high - low) * value / 1000), -2)))
+        positions, counts = self._optimization_slider_knots(total)
+        count = round(np.exp(np.interp(value, positions, np.log(counts))))
         with QSignalBlocker(self.target):
             self.target.setValue(count)
         if selection_total:
@@ -9560,10 +11991,13 @@ class MainWindow(QMainWindow):
         total = selection_total or (
             self.overview_total_triangles if self.tiled_mode else len(self.source_faces)
         )
-        minimum = min(1_000, max(4, total - 1))
-        low = math.log10(minimum)
-        high = math.log10(max(minimum + 1, total))
-        pos = round(1000 * (math.log10(max(minimum, self.target.value())) - low) / (high - low))
+        positions, counts = self._optimization_slider_knots(total)
+        target = self.selection_target if selection_total and self.selection_target else self.target.value()
+        selected_index = list(SMART_DIVISORS).index(self.smart_quality.currentText()) + 1
+        if abs(target - counts[selected_index]) < 1:
+            pos = int(positions[selected_index])
+        else:
+            pos = round(float(np.interp(np.log(max(1, target)), np.log(counts), positions)))
         with QSignalBlocker(self.slider):
             self.slider.setValue(max(0, min(1000, pos)))
 
@@ -9610,10 +12044,15 @@ class MainWindow(QMainWindow):
             self.status.setText(f"Finishing current optimization; queued {fmt_count(target)} triangles…")
             return
         self.pending_target = None
+        if getattr(self, "_envelope_poly", None) is not None:
+            self._clear_envelope()
+        if getattr(self, "_solidify_preview_context", None) is not None:
+            self._cancel_optimized_preview()
         self.generation += 1
         self.running_target = target
         generation = self.generation
         algorithm = self.algorithm.currentText()
+        self._preview_script_step = self._optimization_script_settings()
         self._begin_mesh_operation(
             "Optimizing",
             (
@@ -9636,9 +12075,9 @@ class MainWindow(QMainWindow):
         faces = self.source_faces
         progress_path = self._start_operation_progress(
             generation,
-            "Analyzing depth and density on GPU"
+            "Analyzing depth and density"
             if algorithm == DEPTH_DENSITY_ADAPTIVE_LABEL
-            else "Analyzing surface on GPU"
+            else "Analyzing surface"
             if is_gpu_guided_algorithm(algorithm)
             else "Reducing mesh topology",
         )
@@ -9653,6 +12092,7 @@ class MainWindow(QMainWindow):
             progress_path,
             self._cached_source_measurements(points, faces),
             self._cached_probe_statistics(points, faces),
+            self._working_mesh_requires_closed_output(),
         )
         self.operation_future = future
 
@@ -9673,6 +12113,7 @@ class MainWindow(QMainWindow):
             or self.busy
         ):
             return
+        self._preview_script_step = self._optimization_script_settings()
         target = min(self.target.value(), self.overview_total_triangles)
         self.generation += 1
         generation = self.generation
@@ -9685,6 +12126,7 @@ class MainWindow(QMainWindow):
         output_path = self.tiled_index_directory / "optimized-preview.stl"
         source_points = self.source_points.copy()
         source_faces = self.source_faces.copy()
+        preserve_closed = self._working_mesh_requires_closed_output()
         cancel_event = self.operation_cancel_event
 
         def job():
@@ -9722,6 +12164,9 @@ class MainWindow(QMainWindow):
                 )
                 _write_process_progress(progress_path, "Loading optimized mesh", 0, 1)
                 _poly, points, faces = load_stl(output_path)
+                if preserve_closed:
+                    from closed_reduction import validate_closed_reduction
+                    points, faces = validate_closed_reduction(points, faces, progress)
                 metrics = mesh_quality_metrics(
                     source_points,
                     source_faces,
@@ -9733,6 +12178,7 @@ class MainWindow(QMainWindow):
                     cancel_event=cancel_event,
                 )
                 _write_process_progress(progress_path, "Loading optimized mesh", 1, 1)
+                metrics["closed_output"] = preserve_closed
                 return points, faces, metrics, None
             except Exception:  # noqa: BLE001 - worker boundary returns diagnostics to the UI
                 return None, None, None, traceback.format_exc()
@@ -9765,8 +12211,12 @@ class MainWindow(QMainWindow):
         self.bridge.done.emit(generation, points, faces, metrics, error, prepared_viewport)
 
     def _finish_simplify(self, generation: int, points, faces, metrics, error, prepared_viewport=None) -> None:
+        self._solidify_preview_context = None
         if generation != self.generation:
             return
+        if metrics and metrics.get("geometry_workload"):
+            from geometry_workload import merge
+            merge(metrics["geometry_workload"])
         self._end_mesh_operation()
         target_changed = self.running_target is not None and self.target.value() != self.running_target
         self.preview_dirty = target_changed
@@ -9780,6 +12230,10 @@ class MainWindow(QMainWindow):
         elif generation == self.generation:
             self.preview_poly = (prepared_viewport[0] if prepared_viewport is not None
                                  else arrays_polydata(points, faces))
+            if metrics and metrics.get('closed_output'):
+                from vtkmodules.vtkCommonCore import vtkIntArray
+                marker = vtkIntArray(); marker.SetName('ImprintClosedOutput'); marker.InsertNextValue(1)
+                self.preview_poly.GetFieldData().AddArray(marker)
             self.preview_is_selection = False
             self.simplified_actor = None
             self.preview_count.setText(fmt_count(len(faces)))
@@ -9823,15 +12277,19 @@ class MainWindow(QMainWindow):
             self._update_measure_panel()
 
     def _update_optimization_ratio(self, optimized_triangles: int | None) -> None:
-        if self.loaded_triangle_count <= 0 or not optimized_triangles:
+        working_count = (self.overview_total_triangles if self.tiled_mode else
+                         len(self.source_faces) if self.source_faces is not None else 0)
+        if working_count <= 0 or not optimized_triangles:
             self.optimization_ratio.setText("—")
             return
-        reduction = 100.0 * (1.0 - optimized_triangles / self.loaded_triangle_count)
+        reduction = 100.0 * (1.0 - optimized_triangles / working_count)
         self.optimization_ratio.setText(f"{reduction:.1f}%")
 
     def _update_quality_metrics(
         self, metrics: dict[str, float] | None, *, measured: bool = False
     ) -> None:
+        self._last_quality_metrics = dict(metrics) if metrics else None
+        self._last_quality_measured = measured
         if not hasattr(self, "quality_metric_labels"):
             return
         abbreviations = {
@@ -9884,11 +12342,39 @@ class MainWindow(QMainWindow):
         else:
             self.drift.setText("—")
 
+    def _display_pending_result_statistics(self) -> bool:
+        cast = getattr(self, "_envelope_poly", None)
+        if cast is not None and getattr(self, "_envelope_settings_key", None) != self._imprint_preview_settings_key():
+            cast = None
+        solid = getattr(self, "_solidify_preview_context", None)
+        ready_preview = (self.preview_poly is not None and self.preview_poly is not self.source_poly
+                         and (solid is not None or not self.preview_dirty))
+        poly = cast if cast is not None else self.preview_poly if ready_preview else None
+        if poly is None:
+            return False
+        count = poly.GetNumberOfPolys()
+        self.preview_count.setText(fmt_count(count))
+        self.preview_vertices.setText(fmt_count(poly.GetNumberOfPoints()))
+        self.estimated_file_size.setText(fmt_bytes(binary_stl_size(count)))
+        self._update_optimization_ratio(count)
+        metrics = (solid.get("metrics") if solid is not None else
+                   getattr(self, "_last_quality_metrics", None)) if cast is None else None
+        self._update_quality_metrics(metrics, measured=True)
+        self.dimension_drift_model_units = np.abs(
+            np.asarray(bounds_size(poly.GetBounds())) - np.asarray(bounds_size(self.source_poly.GetBounds())))
+        self._update_dimension_labels()
+        return True
+
     def _update_estimated_size(self) -> None:
         if self.source_faces is None or self.source_points is None:
             self.preview_count.setText("—")
             self.preview_vertices.setText("—")
             self.estimated_file_size.setText("—")
+            return
+        self._refresh_solidify_availability()
+        self.target_display.setText(fmt_count(
+            int(self.selection_target or self.target.value()) if self._selected_triangle_count() else self.target.value()))
+        if self._display_pending_result_statistics():
             return
         if self.overview_mode and not self.tiled_mode:
             self.preview_count.setText("—")
@@ -9930,13 +12416,9 @@ class MainWindow(QMainWindow):
         self.estimated_file_size.setText(fmt_bytes(binary_stl_size(estimated_triangles)))
 
     def _set_primary_action(self, pass_ready: bool, enabled: bool) -> None:
-        self.pass_ready = pass_ready
-        self.preview_button.setText("Apply" if pass_ready else "Optimize")
-        self.preview_button.setToolTip(
-            "Apply this optimized result as the mesh for the next pass."
-            if pass_ready
-            else "Optimize the mesh using the current settings."
-        )
+        self.pass_ready = pass_ready or getattr(self, "_solidify_preview_context", None) is not None
+        self.preview_button.setText("Optimize")
+        self.preview_button.setToolTip("Generate an optimization preview using the current settings.")
         self.preview_button.setEnabled(enabled)
         if hasattr(self, "cancel_preview_button"):
             has_unlocked_result = (
@@ -9946,10 +12428,20 @@ class MainWindow(QMainWindow):
             )
             self.cancel_preview_button.setEnabled(has_unlocked_result and not self.busy)
 
+    def _working_mesh_requires_closed_output(self) -> bool:
+        if self.source_poly is None:
+            return False
+        marker = self.source_poly.GetFieldData().GetArray("ImprintClosedOutput")
+        if marker is not None and marker.GetValue(0):
+            return True
+        if getattr(self, "_solidification_applied", False):
+            # Solidifying a selection does not close unrelated open scan regions.
+            from closed_reduction import is_closed_mesh
+            return is_closed_mesh(self.source_points, self.source_faces)
+        return False
+
     def _primary_optimize_action(self, _checked=False) -> None:
-        if self.pass_ready:
-            self._apply_optimized_pass()
-        elif self._selected_triangle_count():
+        if self._selected_triangle_count():
             self._selection_shortcut("optimize")
         else:
             self.preview()
@@ -9957,13 +12449,15 @@ class MainWindow(QMainWindow):
     def _show_selection_primary_action(self) -> None:
         if not hasattr(self, "preview_button") or not self._selected_triangle_count():
             return
-        self.preview_button.setText("Optimize selection")
+        self.preview_button.setText("Optimize")
         self.preview_button.setToolTip(
             "Optimize only the highlighted triangles using the current settings."
         )
         self.preview_button.setEnabled(not self.busy)
 
     def _cancel_optimized_preview(self, _checked=False) -> None:
+        was_solidify = getattr(self, "_solidify_preview_context", None) is not None
+        self._solidify_preview_context = None
         if (
             self.busy
             or self.source_poly is None
@@ -9993,13 +12487,41 @@ class MainWindow(QMainWindow):
         )
         self.save_button.setEnabled(self.mesh_modified)
         self._show_poly(self.source_poly, reset_camera=False)
+        self.solidify_preview_button.setText("Solidify")
         if was_selection_preview:
             self._clear_selection(message=None)
             self.status.setText("Selection optimization cancelled • selection cleared")
         else:
-            self.status.setText("Optimization cancelled")
+            self.status.setText("Solid preview discarded" if was_solidify else "Optimization cancelled")
+
+    def _optimization_script_settings(self):
+        return {"kind": "optimize", "algorithm": CLI_ALGORITHM_KEYS.get(self.algorithm.currentText(), "auto"),
+                "quality": self.smart_quality.currentText().lower(), "aggressiveness": 7.0,
+                "gpu": self.gpu_preference, "processing": self.large_mesh_mode,
+                "workers": self.geometry_processes, "auto_tiling": self.auto_tiling_enabled,
+                "memory_percent": self.large_mesh_memory_percent,
+                "preserve_closed": self._working_mesh_requires_closed_output()}
 
     def _apply_optimized_pass(self, _checked=False) -> None:
+        solid = getattr(self, "_solidify_preview_context", None)
+        if solid is not None and not self.busy:
+            from solidify import combine_selected_solid
+            poly = combine_selected_solid(solid["source_points"], solid["source_faces"],
+                                           solid.get("mask"), solid["solid_poly"])
+            points, faces = polydata_arrays(poly)
+            # History should capture the unchanged source, not an uncommitted
+            # preview that would reappear on top of it after Undo.
+            self._cancel_optimized_preview()
+            self._solidify_preview_context = None
+            self._set_working_mesh(poly, points, faces, "Applied solidification", committed_optimization=False,
+                                   script_pass=solid.get("script_step"),
+                                   script_omission="Selection solidification" if solid.get("script_step") is None else None,
+                                   solidification_applied=True)
+            self.solidify_preview_button.setText("Solidify")
+            self.solidify_toggle.setChecked(False)
+            self.optimization_toggle.setChecked(True)
+            self._refresh_workflow_actions()
+            return
         if (
             self.busy
             or self.preview_poly is None
@@ -10013,14 +12535,7 @@ class MainWindow(QMainWindow):
         selection_pass = self.preview_is_selection
         script_pass = None
         if not selection_pass:
-            algorithm = self.algorithm.currentText()
-            script_pass = {
-                "algorithm": CLI_ALGORITHM_KEYS.get(algorithm, "auto"),
-                "target": int(self.target.value()),
-                "aggressiveness": 7.0,
-                "gpu": self.gpu_preference,
-                "quality": self.smart_quality.currentText(),
-            }
+            script_pass = dict(getattr(self, "_preview_script_step", None) or self._optimization_script_settings())
         if selection_pass:
             self.preview_poly = None
             self.simplified_actor = None
@@ -10038,11 +12553,29 @@ class MainWindow(QMainWindow):
         )
 
     def _generate_optimization_script(self, _checked=False) -> None:
-        if self.source_path is None or not self.optimization_script_passes:
+        if self.source_path is None or not self.mesh_modified:
             return
+        script_source = self.source_path
+        if self.script_base_poly is not None:
+            try:
+                from mesh_export import write_polygon_mesh
+                handle, filename = tempfile.mkstemp(prefix=self.source_path.stem + "-workflow-input-", suffix=".ply",
+                                                    dir=self.source_path.parent)
+                os.close(handle)
+                script_source = Path(filename)
+                points, faces = polydata_arrays(self.script_base_poly)
+                write_polygon_mesh(points, faces, script_source, merge=False)
+            except (OSError, ValueError) as error:
+                if script_source != self.source_path:
+                    script_source.unlink(missing_ok=True)
+                QMessageBox.warning(self, APP_NAME, f"Could not save the workflow input mesh.\n{error}")
+                return
+        script_steps = list(self.optimization_script_passes)
+        if self.export_calibration_transform is not None:
+            script_steps.append({"kind": "convert", "export_transform": self.export_calibration_transform.tolist()})
         generated = render_optimization_script(
-            self.source_path,
-            self.optimization_script_passes,
+            script_source,
+            script_steps,
             self.optimization_script_omissions,
         )
         suggested = self.source_path.with_name(f"{self.source_path.stem}_meshmill_passes.ps1")
@@ -10084,7 +12617,7 @@ class MainWindow(QMainWindow):
             if destination.suffix.lower() != ".ps1":
                 destination = destination.with_suffix(".ps1")
             try:
-                destination.write_text(editor.toPlainText(), encoding="utf-8", newline="\r\n")
+                destination.write_text(editor.toPlainText(), encoding="utf-8-sig", newline="\r\n")
             except OSError as exc:
                 QMessageBox.critical(
                     script_dialog,
@@ -10116,6 +12649,7 @@ class MainWindow(QMainWindow):
             self.toggle_mesh_button.setText("Show optimized")
             self.showing_original = True
             self._show_poly(self.source_poly, reset_camera=False)
+        self._update_action_row_visibility()
 
     def _reset_previous_view(self) -> None:
         self.showing_previous = False
@@ -10132,6 +12666,7 @@ class MainWindow(QMainWindow):
             self.previous_mesh_button.setEnabled(
                 previous is not None and previous is not current and not self.busy
             )
+        self._update_action_row_visibility()
 
     def _toggle_previous_mesh(self) -> None:
         if self.source_poly is None or not self.undo_stack:
@@ -10147,6 +12682,7 @@ class MainWindow(QMainWindow):
             self._show_poly(current, reset_camera=False)
             previous = self.undo_stack[-1].poly if self.undo_stack else None
             self.previous_mesh_button.setEnabled(previous is not current and not self.busy)
+            self._update_action_row_visibility()
             return
 
         previous = self.undo_stack[-1].poly
@@ -10165,6 +12701,7 @@ class MainWindow(QMainWindow):
             else self.preview_poly
         )
         self.previous_mesh_button.setEnabled(current is not previous and not self.busy)
+        self._update_action_row_visibility()
 
     def _capture_and_exit(self, path: Path) -> None:
         # Verification images document the settled application state. Density coloring runs in a
@@ -10293,6 +12830,14 @@ class MainWindow(QMainWindow):
         return None
 
     def _show_poly(self, poly: vtkPolyData, reset_camera: bool = True, prepared=None) -> None:
+        if poly is self.source_poly or poly is self.preview_poly:
+            self.showing_previous = False
+            self.showing_original = poly is self.source_poly
+            self._update_action_row_visibility()
+        self._refresh_imprint_plan()
+        if (getattr(self, "_envelope_actor", None) is not None
+                and self.source_poly is not getattr(self, "_envelope_source_poly", None)):
+            self._clear_envelope()
         if poly is self.source_poly and self.source_actor is not None:
             actor = self.source_actor
         elif poly is self.preview_poly and self.simplified_actor is not None:
@@ -10338,6 +12883,12 @@ class MainWindow(QMainWindow):
         self.renderer.AddActor(actor)
         self.preview_actor = actor
         self.active_actor = actor
+        self._request_orientation_miniature()
+        self._sync_imprint_split_widget()
+        envelope = getattr(self, "_envelope_actor", None)
+        if envelope is not None:
+            self.renderer.AddActor(envelope)
+            self._update_envelope_overlay()
         if (
             actor is self.source_actor
             and self.crop_selection_actor is not None
@@ -10362,6 +12913,9 @@ class MainWindow(QMainWindow):
             self.renderer.ResetCameraClippingRange()
             self._establish_opening_front()
         self._update_measure_overlay(render=False)
+        # Cached history can have different depth extents. Refresh near/far
+        # planes before its first frame while keeping the user's camera pose.
+        self.renderer.ResetCameraClippingRange()
         self.vtk_widget.GetRenderWindow().Render()
         resident = inspect_resident_vertices(actor)
         if resident is not None:
@@ -11022,7 +13576,7 @@ class MainWindow(QMainWindow):
             dialog,
         )
         privacy_note.setWordWrap(True)
-        privacy_note.setStyleSheet("color: #5E6B80;")
+        privacy_note.setProperty("muted", True)
         layout.addWidget(privacy_note)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel, parent=dialog)
@@ -11067,7 +13621,7 @@ class MainWindow(QMainWindow):
         title = QLabel(f"{APP_NAME} {APP_VERSION}", dialog)
         title.setObjectName("aboutTitle")
         title_layout.addWidget(title)
-        description = QLabel("STL mesh inspection, selection, and optimization.", dialog)
+        description = QLabel("Inspect, reduce, solidify, and cast STL meshes.", dialog)
         description.setWordWrap(True)
         title_layout.addWidget(description)
         heading.addLayout(title_layout, 1)
@@ -11169,22 +13723,93 @@ class MainWindow(QMainWindow):
             or self.source_path is None
         ):
             return
-        suggested = self.source_path.with_name(
-            f"{self.source_path.stem}_{len(self.source_faces) // 1000}k.stl"
-        )
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save current mesh", os.fspath(suggested), "STL mesh (*.stl)"
-        )
-        if not path:
+        suggested = suggested_mesh_path(self.source_path, len(self.source_faces))
+        from mesh_export_ui import choose_mesh_export
+        choice = choose_mesh_export(self, "Save current mesh", suggested, self.source_poly)
+        if choice is None:
             return
-        if not path.lower().endswith(".stl"):
-            path += ".stl"
-        try:
-            save_stl(self.source_poly, Path(path))
-        except OSError:
-            QMessageBox.critical(self, APP_NAME, "VTK could not save the STL.")
+        destination, merge = choice
+        self._export_meshes([(destination, self.source_poly)], merge)
+
+    def _export_meshes(self, outputs, merge: bool, closed=None) -> None:
+        if self.busy:
             return
-        self.status.setText(f"Saved {path}")
+        if self.source_path and any(path.resolve() == Path(self.source_path).resolve()
+                                    for path, _ in outputs):
+            QMessageBox.warning(self, APP_NAME, "Choose a separate output file.")
+            return
+        # Each export owns its VTK data. The viewport and history remain editable
+        # geometry sources rather than inputs to background VTK filters.
+        snapshots = []
+        from mesh_export import calibrated_export_mesh
+        for path, poly in outputs:
+            snapshot = vtkPolyData()
+            snapshot.DeepCopy(poly)
+            snapshots.append((path, calibrated_export_mesh(snapshot, self.export_calibration_transform)))
+        token = self._begin_mesh_operation("Exporting", outputs[0][0].name)
+        cancel = threading.Event()
+        self.operation_cancel_event = cancel
+        progress_path = self._start_operation_progress(token, "Preparing export")
+        def work():
+            from mesh_export import write_polygon_mesh
+            reports = []
+            def progress(stage, completed, total):
+                if cancel.is_set():
+                    raise OperationCancelled
+                _write_process_progress(progress_path, stage, completed, total)
+            for path, poly in snapshots:
+                progress("Preparing export", 0, 1)
+                marker = poly.GetFieldData().GetArray("ImprintClosedOutput")
+                if marker is not None or closed is not None:
+                    from imprint_cleanup import clean_generated_mesh
+                    is_closed = closed if closed is not None else bool(marker.GetValue(0))
+                    poly, _ = clean_generated_mesh(poly, closed=is_closed)
+                    # This isolated export copy has already passed cleanup.
+                    poly.GetFieldData().RemoveArray("ImprintClosedOutput")
+                if path.suffix.lower() == '.stl':
+                    import tempfile
+                    fd, temporary = tempfile.mkstemp(prefix='.meshmill-export-', suffix='.stl', dir=path.parent)
+                    os.close(fd)
+                    try:
+                        progress("Writing geometry", 0, poly.GetNumberOfPolys())
+                        save_stl(poly, Path(temporary))
+                        progress("Writing geometry", poly.GetNumberOfPolys(), poly.GetNumberOfPolys())
+                        os.replace(temporary, path)
+                    finally:
+                        Path(temporary).unlink(missing_ok=True)
+                    reports.append({"polygons": poly.GetNumberOfPolys()})
+                else:
+                    points, faces = polydata_arrays(poly)
+                    reports.append(write_polygon_mesh(points, faces, path, merge=merge,
+                                                       unit_meter=.001, progress=progress))
+            return reports
+        future = self.executor.submit(work)
+        self.operation_future = future
+        poll = QTimer(self)
+        poll.setInterval(60)
+        def finished():
+            if token != self.edit_generation or getattr(self, "_closing", False):
+                poll.stop()
+                poll.deleteLater()
+                return
+            if not future.done():
+                return
+            poll.stop()
+            poll.deleteLater()
+            try:
+                reports = future.result()
+            except OperationCancelled:
+                self._end_mesh_operation()
+                self.status.setText("Export cancelled")
+            except Exception as error:  # noqa: BLE001 - export worker boundary
+                self._end_mesh_operation()
+                QMessageBox.warning(self, APP_NAME, str(error) or "Export failed")
+            else:
+                self._end_mesh_operation()
+                total = sum(report['polygons'] for report in reports)
+                self.status.setText(f"Saved {fmt_count(total)} faces ({outputs[0][0].suffix})")
+        poll.timeout.connect(finished)
+        poll.start()
 
 
 def main() -> int:

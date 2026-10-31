@@ -393,7 +393,7 @@ def adaptive_probe_projection(
 
     started = time.perf_counter()
     device_id = select_cuda_device(gpu_preference)
-    stage = "Analyzing depth and density on GPU" if density_adaptive else "Analyzing surface on GPU"
+    stage = "Analyzing depth and density" if density_adaptive else "Analyzing surface"
     if progress is not None:
         progress(stage, 0, 6)
     physical = physical_probe_dimensions(points, faces, target, source_statistics)
@@ -588,7 +588,7 @@ def simplify_depth_adaptive_qem(
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Run Depth Adaptive QEM, or boundary-preserving Fast QEM without CUDA."""
     if progress is not None:
-        progress("Analyzing surface on GPU", 0, 6)
+        progress("Analyzing surface", 0, 6)
     try:
         projected, report = adaptive_probe_projection(
             points,
@@ -640,7 +640,7 @@ def simplify_depth_density_adaptive_qem(
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Combine density-adaptive depth probes, Fast QEM, and bounded finishing."""
     if progress is not None:
-        progress("Analyzing depth and density on GPU", 0, 6)
+        progress("Analyzing depth and density", 0, 6)
     try:
         projected, report = adaptive_probe_projection(
             points,

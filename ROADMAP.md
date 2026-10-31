@@ -1,6 +1,6 @@
 # MeshMill roadmap
 
-This roadmap tracks work through 0.3.3 and planned additions. Checked items are completed.
+This roadmap tracks released features and current development. Checked items in the 0.4 section are implemented locally and remain subject to release validation.
 Released features are documented in the [changelog](CHANGELOG.md).
 
 ## Maintenance (0.3.1)
@@ -38,6 +38,26 @@ Released features are documented in the [changelog](CHANGELOG.md).
 - [x] Add configurable opening folders and an explicit Windows default-app preference.
 - [x] Add optional update installation with patch-only or all-release scope, off by default.
 - [x] Refine Preferences layout and theme terminology.
+
+## Current development (0.4)
+
+- [x] Solidify whole meshes and selected regions with preview, validation, and shared editing history.
+- [x] Add fitted Envelope and Clamshell casts, adjustable clearance, and Blob or Box exteriors.
+- [x] Add interactive split-plane controls and separate connected clamshell halves.
+- [x] Open and export STL, COLLADA, GLB, OBJ, and PLY.
+- [x] Compare export formats and remember preferred compact-save settings.
+- [x] Generate headless Optimize, Solidify, and Cast workflows with geometry checkpoints for interactive edits.
+- [x] Consolidate shared Actions and allow toolbox section ordering.
+- [x] Add optional recent files, smoother navigation, orientation miniatures, and expanded GPU metrics.
+- [x] Add probe-guided axial calibration, measured runout, angular coverage, and stable inspection.
+- [x] Add one-degree rotation taps and smoothly accelerating keyboard navigation.
+- [x] Add viewport alignment references, edge-pinned offsets, manual depth adjustment, and automatic fit until manual zoom.
+- [x] Spread quality presets across the slider without changing their triangle targets.
+- [x] Defer optional export merging until Save and keep it off by default.
+- [ ] Complete independent scan coverage and final export compatibility checks.
+- [ ] Complete package, dependency, upgrade, and uninstall verification.
+- [ ] Refresh screenshots for the final interface and update localization status.
+- [x] Publish Solidify, Cast, and axial calibration reports with formulas, geometry figures, data, and reproduction code.
 
 ## Distributed tile processing
 
@@ -126,14 +146,15 @@ See [out-of-core architecture](docs/OUT_OF_CORE.md) and
 
 ## Printable solid synthesis
 
-Develop a separate depth-guided mode for reconstructing a closed printable exterior from an open
-or incomplete surface. Ordinary reduction continues to preserve intentional open boundaries.
+Solidify is implemented in local 0.4 development. Further work extends completion controls and
+validation coverage. Ordinary reduction continues to preserve intentional open boundaries.
 
 - [ ] Preview filled regions and estimated enclosed volume.
 - [ ] Control the smallest hole to fill and largest gap to bridge.
 - [ ] Protect deliberate openings through explicit regions or boundary selection.
 - [ ] Remove redundant internal geometry.
-- [ ] Validate watertightness, manifold edges, normals, self-intersections, and positive volume.
+- [x] Add closed-output validation for boundaries, manifold edges, and intersections in local Solidify development.
+- [ ] Expand independent validation of normals, positive volume, and difficult incomplete scans.
 - [ ] Report dimensional drift and surface deviation, and identify unresolved regions before export.
 
 ## Platform support and application upgrades

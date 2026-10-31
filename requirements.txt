@@ -4,3 +4,10 @@ nvidia-cuda-nvrtc-cu12==12.0.140; platform_system == "Windows"
 numpy==2.5.3
 PySide6==6.11.2
 vtk==9.7.1
+
+pymeshfix==0.18.1
+tetgen==0.8.4
+PyMaxflow==1.3.2
+python-sat==1.9.dev17
+
+warp-lang==1.9.1

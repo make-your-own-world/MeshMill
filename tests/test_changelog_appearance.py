@@ -2,9 +2,9 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
+from test_metrics_graph_appearance import contrast
 
 import meshmill as mm
-from test_metrics_graph_appearance import contrast
 
 
 @pytest.mark.parametrize("theme", list(mm.APPEARANCE_THEMES))

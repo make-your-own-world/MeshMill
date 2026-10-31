@@ -466,7 +466,7 @@ listed as application capabilities.
 
 Depth Adaptive QEM originated with the project author's physical depth-gauge
 model, not with the GPU simplification papers evaluated during development. Published research
-provided the QEM baseline and alternative strategies that were implemented, measured, and rejected.
+provided the QEM baseline and alternative strategies used in implementation and comparison experiments.
 The complete distinction, mathematical derivation, execution profile, and failure analysis are in
 [`DEPTH_GAUGE_REDUCTION.md`](DEPTH_GAUGE_REDUCTION.md).
 
@@ -654,7 +654,7 @@ Two triangle-budget refinements were tested:
    stop above its quota. The final result took 26.536 seconds of resident compute and produced
    1.7353 mm RMS and 3.4573 mm P95 distance.
 
-Both approaches were rejected. The retained design requirement is to insert the adaptive probe
+These comparisons informed the next design requirement: insert adaptive probe
 importance directly into a single global QEM edge cost. For endpoints $i,j$, the next reducer should
 rank the ordinary geometric error with an adaptive importance multiplier:
 

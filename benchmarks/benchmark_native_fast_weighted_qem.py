@@ -14,6 +14,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from benchmark_depth_density_adaptive import connected_arrays, load_binary_stl
+
 from depth_adaptive_qem import (
     _area_weighted_vertex_normals,
     _match_surface_area,

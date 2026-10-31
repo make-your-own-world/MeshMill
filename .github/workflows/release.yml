@@ -132,6 +132,16 @@ jobs:
             "$hash  $($_.Name)"
           } | Set-Content "release\SHA256SUMS.txt" -Encoding ascii
 
+      - name: Prepare corresponding dependency sources
+        shell: pwsh
+        run: |
+          python tools/prepare_dependency_sources.py --directory build/dependency-sources --archive "release/MeshMill-${{ steps.version.outputs.version }}-dependency-sources.zip"
+          if ($LASTEXITCODE -ne 0) { throw "Dependency source preparation failed" }
+          Get-ChildItem release -File | Where-Object Name -ne 'SHA256SUMS.txt' | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content "release/SHA256SUMS.txt" -Encoding ascii
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v7
         with:

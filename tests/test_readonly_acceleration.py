@@ -1,14 +1,15 @@
-import numpy as np
-import pytest
 import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
-from vtkmodules.vtkFiltersCore import vtkPolyDataNormals
-from vtkmodules.util.numpy_support import vtk_to_numpy
 
-import meshmill as mm
-import depth_adaptive_qem as daq
+import numpy as np
+import pytest
 from test_operation_progress import sphere
+from vtkmodules.util.numpy_support import vtk_to_numpy
+from vtkmodules.vtkFiltersCore import vtkPolyDataNormals
+
+import depth_adaptive_qem as daq
+import meshmill as mm
 
 
 def test_source_measurements_preserve_targets_and_metrics(monkeypatch):
@@ -151,7 +152,6 @@ def test_density_gpu_fallback_and_cancellation(monkeypatch):
     cancelled = threading.Event()
     def cancel(*args):
         cancelled.set()
-        return None
     monkeypatch.setattr(daq, "readonly_gpu_density_field", cancel)
     with pytest.raises(mm.OperationCancelled):
         mm.point_density_colors(points, faces, cancel_event=cancelled, gpu_preference="system")

@@ -1,7 +1,7 @@
 """Extract one reviewed changelog entry for release publication."""
-from pathlib import Path
 import argparse
 import re
+from pathlib import Path
 
 
 def release_notes(changelog: str, version: str) -> str:
