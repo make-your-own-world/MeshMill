@@ -11,3 +11,4 @@
 *.ico binary
 *.stl binary
 samples/original-scan.stl filter=lfs diff=lfs merge=lfs -text
+samples/joystick-scan.stl filter=lfs diff=lfs merge=lfs -text

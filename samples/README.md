@@ -6,7 +6,7 @@ regional density. This makes it useful for testing density analysis, overlap han
 operations, and competing optimization algorithms. People do not need a scanner to reproduce the
 project's primary geometry experiments.
 
-Both files are included as redistributable test data under the repository's
+These files are included as redistributable test data under the repository's
 GPL-3.0-or-later license.
 
 | Property | `original-scan.stl` | `sample-scan.stl` |
@@ -25,3 +25,20 @@ tracked with Git LFS. Tagged releases publish it as a direct `.stl` download as 
 The geometry is provided as an algorithm-development, application-testing, and demonstration
 fixture. Redundant or unusually dense regions may be intentional and should not be treated as
 fixture defects. It is not a dimensional reference model.
+
+## Joystick scan
+
+[`joystick-scan.stl`](joystick-scan.stl) is a dense scanned part for surface inspection,
+reduction, and Solidify experiments. It is a separate sample from the composite mesh above.
+
+| Property | Value |
+| --- | ---: |
+| Storage | Git LFS |
+| Format | Binary STL |
+| Triangles | 2,357,942 |
+| Vertices | 1,180,309 |
+| Dimensions (source coordinates) | 147.318 x 58.611 x 52.044 |
+| File size | 112.4 MiB |
+
+STL does not store measurement units. Choose the model units that match the intended scale.
+The file is also available as a [direct download](https://github.com/make-your-own-world/MeshMill/releases/download/v0.4.0/MeshMill-sample-joystick-scan.stl).

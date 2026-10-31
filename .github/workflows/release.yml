@@ -130,6 +130,7 @@ jobs:
           python tools/create_reproducible_zip.py "dist\MeshMill" "release\MeshMill-$version-windows-x64-portable.zip"
           if ($LASTEXITCODE -ne 0) { throw "Portable archive creation failed" }
           Copy-Item -LiteralPath "samples\original-scan.stl" -Destination "release\MeshMill-sample-scan-original.stl"
+          Copy-Item -LiteralPath "samples\joystick-scan.stl" -Destination "release\MeshMill-sample-joystick-scan.stl"
           Get-ChildItem release -File | Sort-Object Name | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $($_.Name)"

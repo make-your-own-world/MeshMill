@@ -115,7 +115,7 @@ Windows SmartScreen or macOS Gatekeeper may warn about unsigned packages. Older 
 download checksums are available on [GitHub Releases](https://github.com/make-your-own-world/MeshMill/releases).
 
 
-### Explore the sample mesh
+### Explore the sample meshes
 
 The sample is an intentionally dense composite mesh with redundant layers and uneven point density.
 Use it to explore display modes, crop and regional tools, and compare reduction algorithms without
@@ -125,8 +125,9 @@ a scanner.
 | --- | ---: | --- | --- |
 | Quick sample | 249,999 | [`sample-scan.stl`](samples/sample-scan.stl) | Learning the controls and quick evaluation |
 | Full source sample | 4,126,315 | [Download the full sample STL](https://github.com/make-your-own-world/MeshMill/releases/download/v0.4.0/MeshMill-sample-scan-original.stl) | Dense geometry and large-mesh testing |
+| Joystick scan | 2,357,942 | [Download the joystick scan STL](https://github.com/make-your-own-world/MeshMill/releases/download/v0.4.0/MeshMill-sample-joystick-scan.stl) | Surface inspection, reduction, and Solidify experiments |
 
-The quick sample is included with the repository. The full source sample is also available through
+The quick sample is included with the repository. The full source and joystick scans are also available through
 Git LFS for repository users. See [`samples/README.md`](samples/README.md) for provenance,
 dimensions, and checksums.
 

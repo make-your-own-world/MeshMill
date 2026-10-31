@@ -13,6 +13,7 @@ release/
 *.stl
 !samples/sample-scan.stl
 !samples/original-scan.stl
+!samples/joystick-scan.stl
 *.obj
 *.ply
 *.3mf
