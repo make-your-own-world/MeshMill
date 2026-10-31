@@ -116,6 +116,12 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "{code:GetReopenParameters}"; Fla
 Type: filesandordirs; Name: "{localappdata}\{#MyAppName}"
 
 [Code]
+type
+  TProcessIds = array[0..32767] of LongWord;
+
+function EnumerateProcesses(var ProcessIds: TProcessIds; BufferSize: LongWord;
+  var BytesReturned: LongWord): Boolean;
+  external 'EnumProcesses@psapi.dll stdcall';
 function OpenOwnedProcess(Access: LongWord; Inherit: Boolean; PID: LongWord): THandle;
   external 'OpenProcess@kernel32.dll stdcall';
 function QueryOwnedProcessImage(Process: THandle; Flags: LongWord;
@@ -136,7 +142,8 @@ end;
 
 function StopInstalledProcesses(): String;
 var
-  Locator, Service, Processes, Process: Variant;
+  ProcessIds: TProcessIds;
+  BytesReturned: LongWord;
   I, Pass: Integer;
   Handle: THandle;
   Image: String;
@@ -146,19 +153,17 @@ begin
   Result := '';
   Confirmed := False;
   try
-    Locator := CreateOleObject('WbemScripting.SWbemLocator');
-    Service := Locator.ConnectServer('.', 'root\CIMV2');
-    { Repeat the snapshot to catch workers created while their owner was closing. }
+    { Enumerate native process IDs without depending on WMI/COM automation. }
     for Pass := 1 to 4 do begin
       Found := False;
-      Processes := Service.ExecQuery(
-        'SELECT ProcessId, ExecutablePath FROM Win32_Process WHERE ' +
-        'Name = ''MeshMill.exe'' OR Name = ''MeshMillCLI.exe''');
-      for I := 0 to Processes.Count - 1 do begin
-        Process := Processes.ItemIndex(I);
-        if not VarIsNull(Process.ExecutablePath) then
-          if IsInstalledExecutable(Process.ExecutablePath) then begin
-            Handle := OpenOwnedProcess($00101001, False, Process.ProcessId);
+      if not EnumerateProcesses(ProcessIds, SizeOf(ProcessIds), BytesReturned) or
+        (BytesReturned >= SizeOf(ProcessIds)) then begin
+        Result := 'Running processes could not be checked. Close MeshMill and try again.';
+        Exit;
+      end;
+      for I := 0 to (BytesReturned div 4) - 1 do begin
+        if ProcessIds[I] <> 0 then begin
+            Handle := OpenOwnedProcess($00101001, False, ProcessIds[I]);
             if Handle <> 0 then begin
               try
                 { Recheck the executable through the process handle, not a reusable PID. }
@@ -186,18 +191,9 @@ begin
                       end;
                     end;
                   end;
-                end else if WaitOwnedProcess(Handle, 0) <> 0 then begin
-                  Result := 'MeshMill process cleanup could not be verified. Close MeshMill and try again.';
-                  Exit;
                 end;
               finally
                 CloseOwnedHandle(Handle);
-              end;
-            end else begin
-              { A process may have exited between the snapshot and OpenProcess. }
-              if DLLGetLastError = 5 then begin
-                Result := 'Access to a running MeshMill process was denied. Close it and try again.';
-                Exit;
               end;
             end;
           end;
@@ -206,6 +202,7 @@ begin
     end;
     Result := 'MeshMill is still running. Close it and try again.';
   except
+    Log('Process cleanup exception: ' + GetExceptionMessage);
     Result := 'MeshMill process cleanup could not be verified. Close MeshMill and try again.';
   end;
 end;

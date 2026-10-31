@@ -1,6 +1,6 @@
 # MeshMill roadmap
 
-This roadmap tracks released features and current development. Checked items in the 0.4 section are implemented locally and remain subject to release validation.
+This roadmap tracks completed features and planned development. Checked items are implemented.
 Released features are documented in the [changelog](CHANGELOG.md).
 
 ## Maintenance (0.3.1)
@@ -39,7 +39,7 @@ Released features are documented in the [changelog](CHANGELOG.md).
 - [x] Add optional update installation with patch-only or all-release scope, off by default.
 - [x] Refine Preferences layout and theme terminology.
 
-## Current development (0.4)
+## MeshMill 0.4
 
 - [x] Solidify whole meshes and selected regions with preview, validation, and shared editing history.
 - [x] Add fitted Envelope and Clamshell casts, adjustable clearance, and Blob or Box exteriors.
@@ -146,14 +146,14 @@ See [out-of-core architecture](docs/OUT_OF_CORE.md) and
 
 ## Printable solid synthesis
 
-Solidify is implemented in local 0.4 development. Further work extends completion controls and
+Solidify is included in 0.4. Further work extends completion controls and
 validation coverage. Ordinary reduction continues to preserve intentional open boundaries.
 
 - [ ] Preview filled regions and estimated enclosed volume.
 - [ ] Control the smallest hole to fill and largest gap to bridge.
 - [ ] Protect deliberate openings through explicit regions or boundary selection.
 - [ ] Remove redundant internal geometry.
-- [x] Add closed-output validation for boundaries, manifold edges, and intersections in local Solidify development.
+- [x] Add closed-output validation for boundaries, manifold edges, and intersections in Solidify.
 - [ ] Expand independent validation of normals, positive volume, and difficult incomplete scans.
 - [ ] Report dimensional drift and surface deviation, and identify unresolved regions before export.
 

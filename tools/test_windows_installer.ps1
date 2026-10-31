@@ -308,7 +308,7 @@ try {
         throw "Installation changed the default STL handler."
     }
     Write-Host "Installer install, upgrade, launch, and uninstall checks passed."
- }
+}
 catch {
     Write-Host ("Installer validation failed: " + $_.Exception.Message)
     foreach ($DiagnosticLog in @($InstallLog, $UpgradeLog)) {
