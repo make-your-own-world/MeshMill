@@ -1,4 +1,8 @@
+import sys
+from types import SimpleNamespace
+
 import numpy as np
+import pytest
 from pymeshfix import PyTMesh
 from test_solidify import open_cube
 from vtkmodules.util.numpy_support import vtk_to_numpy
@@ -52,3 +56,36 @@ def test_small_crossing_scan_fragments_are_repaired_without_moving_walls():
     assert check.n_boundaries == 0
     assert len(check.select_intersecting_triangles()) == 0
     assert arrays_polydata(result_points, result_faces).GetNumberOfCells() > 0
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "setup", "query"])
+def test_solid_completion_falls_back_when_cuda_is_unusable(monkeypatch, failure):
+    import depth_adaptive_qem
+
+    source = open_cube()
+    points = vtk_to_numpy(source.GetPoints().GetData()).astype(float)
+    faces = vtk_to_numpy(source.GetPolys().GetConnectivityArray()).reshape(-1, 3)
+    expected_points, expected_faces, _ = complete_scan_volume(points, faces)
+    calls = []
+
+    class BrokenGPU:
+        def __init__(self, *args):
+            calls.append("setup")
+            if failure == "setup":
+                raise RuntimeError("CUDA driver unavailable")
+
+        def evaluate(self, queries):
+            calls.append("query")
+            raise RuntimeError("CUDA device unavailable")
+
+    monkeypatch.setattr(depth_adaptive_qem, "gpu_backend_supported",
+                        lambda preference: failure != "unavailable")
+    monkeypatch.setitem(sys.modules, "surface_distance_gpu",
+                        SimpleNamespace(GPUSurfaceDistance=BrokenGPU))
+    result_points, result_faces, report = complete_scan_volume(
+        points, faces, gpu_preference="system")
+    assert np.array_equal(result_points, expected_points)
+    assert np.array_equal(result_faces, expected_faces)
+    assert report["topology"]["boundary_edges"] == 0
+    assert calls == {"unavailable": [], "setup": ["setup"],
+                     "query": ["setup", "query"]}[failure]

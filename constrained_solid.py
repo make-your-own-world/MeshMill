@@ -66,28 +66,36 @@ def complete_volume(points, faces, gpu_preference=None, progress=lambda *args: N
         hardin[ids[side < 0]] = True
         hardout[ids[side > 0]] = True
     progress("Classifying volume", 0, len(centers))
-    try:
-        if gpu_preference is None:
-            raise ImportError
-        from surface_distance_gpu import GPUSurfaceDistance
+    sampler = None
+    if gpu_preference is not None:
+        try:
+            from depth_adaptive_qem import gpu_backend_supported
 
-        sampler = GPUSurfaceDistance(sp, sf, gpu_preference)
-        signed = np.empty(len(centers), dtype=float)
-        for begin in range(0, len(centers), 32768):
-            end = min(begin + 32768, len(centers))
-            signed[begin:end] = sampler.evaluate(centers[begin:end])
-            progress("Classifying volume", end, len(centers))
+            if gpu_backend_supported(gpu_preference):
+                from surface_distance_gpu import GPUSurfaceDistance
 
-    except ImportError:
-        distance = vtkImplicitPolyDataDistance()
-        distance.SetInput(_poly(sp, sf))
-        signed = np.empty(len(centers), dtype=float)
-        for begin in range(0, len(centers), 32768):
-            end = min(begin + 32768, len(centers))
+                sampler = GPUSurfaceDistance(sp, sf, gpu_preference)
+        except Exception:  # noqa: BLE001 - optional CUDA backends expose several exception types
+            sampler = None
+    distance = None
+    signed = np.empty(len(centers), dtype=float)
+    for begin in range(0, len(centers), 32768):
+        end = min(begin + 32768, len(centers))
+        if sampler is not None:
+            try:
+                signed[begin:end] = sampler.evaluate(centers[begin:end])
+            except Exception:  # noqa: BLE001 - a lost device must not prevent CPU completion
+                sampler = None
+        if sampler is None:
+            if distance is None:
+                distance = vtkImplicitPolyDataDistance()
+                distance.SetInput(_poly(sp, sf))
+                # Restart classification so every value uses the same distance backend.
+                begin = 0
             values = vtkDoubleArray()
             distance.EvaluateFunction(numpy_to_vtk(centers[begin:end], deep=True), values)
             signed[begin:end] = vtk_to_numpy(values)
-            progress("Classifying volume", end, len(centers))
+        progress("Classifying volume", end, len(centers))
     progress("Classifying volume", len(centers), len(centers))
     vol = (
         np.abs(

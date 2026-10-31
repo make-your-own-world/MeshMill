@@ -47,6 +47,9 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
 
 
+      - name: Validate export, automation, and worker lifecycle
+        run: python -m pytest tests/test_mesh_export.py tests/test_calibrated_export.py tests/test_workflow_scripts.py tests/test_new_geometry/test_solid_surface_prepare.py tests/test_worker_lifecycle.py tests/test_release_notes.py -q
+
       - name: Generate version metadata
         run: python tools/write_version_info.py --version "${{ steps.version.outputs.version }}"
 
